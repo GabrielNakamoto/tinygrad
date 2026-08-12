@@ -8,6 +8,7 @@ from tinygrad.codegen.decomp.transcendental import xexp2, xlog2
 from tinygrad.renderer.amd.elf import assemble_linear
 import tinygrad.runtime.autogen.amd.rdna3.ins as RDNA3Ops
 import itertools, functools
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -47,7 +48,6 @@ def _build_ins_table(srcs):
 OP_INS = _build_ins_table(insdefs)
 V_RSQ = { dtypes.float32:RDNA3Ops.v_rsq_f32_e32, dtypes.float64:RDNA3Ops.v_rsq_f64_e32, dtypes.float16:RDNA3Ops.v_rsq_f16_e32}
 V_FMA = { dtypes.float16:RDNA3Ops.v_fma_f16, dtypes.float32:RDNA3Ops.v_fma_f32, dtypes.float64:RDNA3Ops.v_fma_f64 }
-# V_MIN = { dtypes.float32:RDNA3Ops.v_min_f32_e32, dtypes.float16:RDNA3Ops.v_min_f16_e32, dtypes.uint32:RDNA3Ops.v_min_u32_e32, dtypes.int32:RDNA3Ops.v_min_i32_e32, dtypes.float64:RDNA3Ops.v_min_f64 }
 V_LSHL = { 2:RDNA3Ops.v_lshlrev_b16, 4:RDNA3Ops.v_lshlrev_b32_e32, 8:RDNA3Ops.v_lshlrev_b64 }
 V_LSHR = { 2:RDNA3Ops.v_lshrrev_b16, 4:RDNA3Ops.v_lshrrev_b32_e32, 8:RDNA3Ops.v_lshrrev_b64 }
 V_ASHR = { 4:RDNA3Ops.v_ashrrev_i32_e32, 8:RDNA3Ops.v_ashrrev_i64 }
@@ -622,8 +622,8 @@ class CntType(Enum):
   DS_CNT = auto(); LOAD_CNT = auto(); STORE_CNT = auto()
 
   def get(u:UOp):
-    if u.arg.func in { RDNA3Ops.GLOBAL, RDNA3Ops.FLAT, RDNA3Ops.SCRATCH }:
-      return CntType.STORE_CNT if u.dtype is dtypes.void else CntType.LOAD_CNT
+    # if u.arg.func in { RDNA3Ops.GLOBAL, RDNA3Ops.FLAT, RDNA3Ops.SCRATCH }: return CntType.STORE_CNT if u.dtype is dtypes.void else CntType.LOAD_CNT
+    if u.arg.func in { RDNA3Ops.GLOBAL, RDNA3Ops.FLAT, RDNA3Ops.SCRATCH } and u.dtype is not dtypes.void: return CntType.LOAD_CNT
     if u.arg.func in { RDNA3Ops.SMEM, RDNA3Ops.DS }: return CntType.DS_CNT
     return None
 
@@ -677,15 +677,26 @@ class RDNA3Renderer(ISARenderer):
     return vmov(u,r)
 
   def asm(self, prg:UOp, lin:UOp) -> bytes:
-    deps: set[Register] = set()
+    deps: dict[Register, tuple[CntType, UOp]] = {}
     nuops = []
+    outstanding: dict[CntType, deque] = {}
+
     # s_waitcnt
+    # this is high priority! memory pipelining is highest leverage
+    def _waitcnt(tp:CntType, v:int) -> UOp: return const(v << 6) if tp is CntType.DS_CNT else const(v)
     for u in lin.src:
-      if any(r in deps for s in u.src for r in rdefs(s)):
-        nuops.append(UOp(Ops.INS, arg=RDNA3Ops.s_waitcnt, src=(const(0, dtypes.uint16),)))
-        deps.clear()
+      for r in [r for s in u.src for r in rdefs(s)]:
+        if r not in deps: continue
+        tp,m = deps.pop(r)
+        while (o := outstanding[tp].popleft()) is not m:
+          for r in rdefs(o):
+            if r in deps: deps.pop(r)
+        nuops.append(UOp(Ops.INS, arg=RDNA3Ops.s_waitcnt, src=(_waitcnt(tp,len(outstanding[tp])),)))
+        for r in rdefs(m):
+          if r in deps: deps.pop(r)
       if (tp := CntType.get(u)) is not None and tp in [CntType.DS_CNT, CntType.LOAD_CNT]:
-        deps.update(rdefs(u))
+        outstanding.setdefault(tp, deque()).append(u)
+        for r in rdefs(u): deps[r]=(tp,u)
       nuops.append(u)
 
     # s_clause
