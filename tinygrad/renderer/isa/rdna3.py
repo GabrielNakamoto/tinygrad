@@ -227,7 +227,9 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
         return ctx.ren.copy(image, vregs[i])
       else: return ctx.ren.copy(val.src[idx.src[1].val].after(val, idx), vregs[idx.src[1].val])
       # else: return UOp.group(*[ctx.ren.copy(s,v) for s,v in zip(val.src, vregs)]).replace(tag=vregs)
-    else: return ctx.ren.copy(val.after(idx).replace(dtype=idx.dtype), *vregs)
+    else:
+      if val.op is Ops.INDEX and val.src[0].op is Ops.WMMA: return val
+      return ctx.ren.copy(val.after(idx).replace(dtype=idx.dtype), *vregs)
   n = idx.src[-1].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.dtype.itemsize
   prefix = "global" if idx.addrspace is AddrSpace.GLOBAL else "ds"
@@ -328,7 +330,15 @@ def render_wmma(ctx, wmma:UOp):
   srcdt = dt_to_isa[wmma.arg[1]]
   if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
   ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
-  return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(ctx.vreg(GP_VGPRS, width=8),))
+  vr = ctx.vreg(GP_VGPRS, width=8)
+  # efficient reg BUFFER inplace copying, pin regptrs
+  # this needs to run before isel... prevent ptr conflicts
+  if wmma in ctx.wmma_refs:
+    for b,r in ctx.wmma_refs[wmma].items():
+      for i,j in r:
+        assert (b,j) not in ctx.regbufs
+        ctx.regbufs[(b,j)]=(vr.sub(i),)
+  return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(vr,))
 
 # ---- casting utilities -----
 def cvt(ctx, y:UOp, x:UOp):

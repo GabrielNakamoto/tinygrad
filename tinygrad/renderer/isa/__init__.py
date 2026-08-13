@@ -2,7 +2,7 @@ from __future__ import annotations
 import itertools, functools
 from dataclasses import dataclass, field
 from tinygrad.renderer import Renderer
-from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort
+from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort, AddrSpace
 
 @dataclass(frozen=True)
 class Register:
@@ -50,7 +50,18 @@ class PreRegallocContext:
       if u.op is Ops.SPECIAL: return (2, u.arg)
       return (0, u.arg.slot) if u.arg.addrspace is not None else (1, u.expr)
     self.func_args = sorted([u for u in self.uses if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
+
+    # index by ParamArg more efficient?
     self.regbufs: dict[tuple[UOp, int], VRegister] = {} # maps regbuf ptr to cached vregister
+    # TODO: move this into rdna3?
+    self.wmma_refs: dict[UOp, dict[UOp, list[tuple[int,int]]]] = {}
+    for x in sink.toposort():
+      if x.op is not Ops.STORE: continue
+      buf, val = x.src[0].src[0], x.src[1]
+      while buf.op is Ops.AFTER: buf=buf.src[0]
+      if val.op is not Ops.INDEX: continue
+      if buf.addrspace is AddrSpace.REG and val.src[0].op is Ops.WMMA:
+        self.wmma_refs.setdefault(val.src[0], {}).setdefault(buf, []).append((val.src[1].val, x.src[0].src[1].val))
 
   def vreg(self, cons:tuple[Register, ...], **kwargs) -> VRegister:
     return VRegister(f"vr{next(self.reg_n)}", cons if isinstance(cons, tuple) else (cons,), **kwargs)
