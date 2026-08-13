@@ -228,6 +228,7 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
       else: return ctx.ren.copy(val.src[idx.src[1].val].after(val, idx), vregs[idx.src[1].val])
       # else: return UOp.group(*[ctx.ren.copy(s,v) for s,v in zip(val.src, vregs)]).replace(tag=vregs)
     else:
+      # TODO: prevent redundant acc copies
       if val.op is Ops.INDEX and val.src[0].op is Ops.WMMA: return val
       return ctx.ren.copy(val.after(idx).replace(dtype=idx.dtype), *vregs)
   n = idx.src[-1].val if idx.op is Ops.SHRINK else 1
@@ -338,6 +339,11 @@ def alloc_wmma(ctx, wmma:UOp):
 
 def render_wmma(ctx, wmma:UOp):
   a,b,acc = wmma.src
+  # wait till acc is processed to override vreg, reduce reg pressure
+  if rdef(acc) is None: return None
+  vr = rdef(wmma)
+  nsrc = [s.replace(tag=(vr.sub(i),)) for i,s in enumerate(acc.src)]
+  acc = acc.replace(src=tuple(nsrc), tag=wmma.tag)
   srcdt = dt_to_isa[wmma.arg[1]]
   if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
   ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
