@@ -325,11 +325,7 @@ def where(pred:UOp, a:UOp, b:UOp, x:UOp):
   ins = RDNA3Ops.v_cndmask_b32_e64 if x.dtype.itemsize >= 4 else RDNA3Ops.v_cndmask_b16
   return _vop3(x.ins(ins, src=(b,a,pred)))
 
-def render_wmma(ctx, wmma:UOp):
-  a,b,acc = wmma.src
-  srcdt = dt_to_isa[wmma.arg[1]]
-  if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
-  ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
+def alloc_wmma(ctx, wmma:UOp):
   vr = ctx.vreg(GP_VGPRS, width=8)
   # efficient reg BUFFER inplace copying, pin regptrs
   # this needs to run before isel... prevent ptr conflicts
@@ -337,8 +333,15 @@ def render_wmma(ctx, wmma:UOp):
     for b,r in ctx.wmma_refs[wmma].items():
       for i,j in r:
         assert (b,j) not in ctx.regbufs
-        ctx.regbufs[(b,j)]=(vr.sub(i),)
-  return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(vr,))
+        ctx.regbufs[(b,j)]=vr.sub(i)
+  return wmma.replace(tag=(vr,))
+
+def render_wmma(ctx, wmma:UOp):
+  a,b,acc = wmma.src
+  srcdt = dt_to_isa[wmma.arg[1]]
+  if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
+  ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
+  return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=wmma.tag)
 
 # ---- casting utilities -----
 def cvt(ctx, y:UOp, x:UOp):
@@ -415,8 +418,8 @@ def lower_end(ctx, x:UOp, acc:UOp):
   return inc, [inc, pred, jmp, loop_end, restoreexec(ctx.exec_mask[acc])]
 
 # ---- lowering passes ----
+# should this be put in codegen? most good compilers already optimize this in the renderer ex. LLVM, probably HIP
 class BiasMemoryCtx:
-# - should this be put in codegen? most good compilers already optimize this in the renderer ex. LLVM, probably HIP
   def __init__(self, sink:UOp):
     # shared base op -> idx and optional const arg
     self.mgroups: dict[ParamArg, list[tuple[UOp|None, int|None]]] = {}
@@ -433,7 +436,6 @@ class BiasMemoryCtx:
       for idx,v in uses:
         if idx.op is Ops.ADD and idx.src[1].op is Ops.CONST:
           # propagate the normalize addition down sum edges to hint hoist outside range?
-          # this is where this starts to belong in codegen optimizations maybe
           self.normalized[(b,idx)] = idx.replace(src=(idx.src[0] + const(mean, idx.dtype), const(idx.src[1].val - mean, idx.dtype)))
         else: # dynamic base no ioffs
           self.normalized[(b,idx)] = (idx + const(mean, idx.dtype)) + const(-mean, idx.dtype)
@@ -519,6 +521,10 @@ pm_alu_fusion = PatternMatcher([
     lambda ctx,a,b,x: _vop3(x.ins(V_FMA[a.dtype], src=a.src + (b,)))),
   (UPat(Ops.ADD, dtypes.uint32, src=(UPat(Ops.ADD, name="y"), UPat.var("b")), name="x"),
     lambda ctx,x,y,b: _vop3(x.ins(RDNA3Ops.v_add3_u32, src=y.src + (b,)))),
+])
+
+early_regalloc_matcher = PatternMatcher([
+  (UPat(Ops.WMMA, name="wmma"), lambda ctx,wmma: alloc_wmma(ctx,wmma) if rdef(wmma) is None else None),
 ])
 
 isel_matcher = pm_alu_fusion + PatternMatcher([
@@ -657,6 +663,7 @@ class RDNA3Renderer(ISARenderer):
   isel_matcher = isel_matcher
   extra_matcher = extra_matcher
   post_regalloc_matcher = post_regalloc_matcher
+  early_regalloc_matcher = early_regalloc_matcher
   pre_regalloc_matcher = pre_regalloc_matcher
   code_for_op = {x: lambda: None for x in (Ops.SQRT, Ops.LOG2, Ops.EXP2, Ops.SUB, Ops.RECIPROCAL, Ops.TRUNC, Ops.CMPLT, Ops.CMPEQ, Ops.CMPNE, Ops.XOR, Ops.SHR, Ops.SHL, Ops.MAX)}
   post_regalloc_ctx = RDNA3LinearCtx()

@@ -73,15 +73,17 @@ class PreRegallocContext:
 
 class ISARenderer(Renderer):
   pre_isel_matcher: PatternMatcher
+  # allows reserving/pinning/managing register relationships before rewrite ordering conflicts
+  early_regalloc_matcher: PatternMatcher = PatternMatcher([])
   isel_matcher: PatternMatcher
-  pre_regalloc_matcher: PatternMatcher|None = None
+  pre_regalloc_matcher: PatternMatcher = PatternMatcher([])
   post_regalloc_matcher: PatternMatcher
   post_regalloc_ctx: any|None = None
   spill_size: int = 0
 
-  # custom graph rewrites, perform arbitrary arch specific analysis passes/optimizations
-  # that require custom context/belong outside isel
+  # NOTE: probablty should delete this, address bias belongs in codegen
   def early(self, full_sink:UOp) -> UOp: return full_sink
+  def early_regalloc(self, full_sink:UOp) -> UOp: return full_sink
   def is_two_address(self, x:UOp) -> bool: return False
   def stack_alloc(self, uops:list[UOp]) -> list[UOp]: return uops
   def spill_pointer(self) -> UOp: raise NotImplementedError("arch specific")
