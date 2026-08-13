@@ -195,6 +195,7 @@ class VGPRField(SrcField):
   def encode(self, val) -> int:
     if not isinstance(val, Reg): raise TypeError(f"VGPRField requires Reg, got {type(val).__name__}")
     # For 8-bit vdst fields in VOP1/VOP2 16-bit ops, bit 7 is opsel for dest half
+    # print(val, val.hi)
     encoded = super().encode(val)
     if val.hi and (self.hi - self.lo + 1) == 8:
       if encoded >= 128:

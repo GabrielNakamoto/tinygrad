@@ -66,6 +66,8 @@ def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
 def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) else sdt
 
 # ---- register classes/kernel init state ----
+# this doesnt make regalloc slower right?
+
 VGPRS = tuple(Register(f"v{i}", i, size=4) for i in range(256))
 SGPRS = tuple(Register(f"s{i}", i, size=4) for i in range(106))
 KERNARG_PTR, WGIDS, WIIDS = tuple(SGPRS[:2]), tuple(SGPRS[2:5]), (VGPRS[0],)
@@ -83,6 +85,12 @@ def packb16(lo:UOp, hi:UOp):
   lo = lo & const(0xFFFF) # mask off upper half
   return _vop3(UOp(Ops.INS, arg=RDNA3Ops.v_lshl_or_b32, src=(hi, const(16, dtypes.int32), lo)))
 
+def delay_stack(x:UOp):
+  if x.dtype.itemsize == 2 and all(s.op is Ops.LOAD for s in x.src): return True
+  # bitcast hiding VOP3?
+  if x.dtype in (dtypes.half,dtypes.bfloat16) and all(s.op not in {Ops.WHERE, Ops.CONST, Ops.BITCAST} for s in x.src): return True
+  return False
+
 # TODO: replicate this for b8
 # stack of 16 bit loads -> load directly into high/low halfs
 def load_into_stack(ctx, x:UOp) -> UOp:
@@ -97,6 +105,17 @@ def load_into_stack(ctx, x:UOp) -> UOp:
     lo,hi = _mopc(lo, RDNA3Ops.global_load_d16_b16).replace(tag=(vr,)), _mopc(hi, RDNA3Ops.global_load_d16_hi_b16).replace(tag=(vr,))
     out.append(hi.after(lo))
   return UOp.group(*out, dtype=x.dtype, tag=(vp,))
+
+def true_16_stack(ctx, x:UOp) -> UOp:
+  vreg, mvs = ctx.vreg(GP_VGPRS, width=len(x.src)//2), []
+  def _strip(u:UOp):
+    while u.op is Ops.BITCAST: u=u.src[0]
+    return u
+  for i in range(0, len(x.src), 2):
+    lo, hi = _strip(x.src[i]), _strip(x.src[i+1])
+    lo,hi = lo.replace(tag=(vreg.sub(i//2,0),)), hi.replace(tag=(vreg.sub(i//2,1),))
+    mvs.append(hi.after(lo))
+  return UOp.group(*mvs, dtype=x.dtype, tag=(vreg,))
 
 def stack2regs(x:UOp):
   nregs, mvs = ((len(x.src) * x.dtype.itemsize) + 3) // 4, []
@@ -459,7 +478,7 @@ pm_int_to_float = PatternMatcher([
 ])
 
 pre_isel_matcher = PatternMatcher([
-  (UPat(Ops.STACK, name="x"), lambda x: stack2regs(x) if len(x.src) and not (x.dtype.itemsize == 2 and all(s.op is Ops.LOAD for s in x.src)) else None),
+  (UPat(Ops.STACK, name="x"), lambda x: stack2regs(x) if len(x.src) and not delay_stack(x) else None),
   # --- bool repr ---
   # NOTE: booleans get passed around as sgpr masks in between loads and stores, but are converted / realized at mem ops to u8
   (UPat(Ops.STORE, src=(UPat.var("buf"), UPat.var("val", dtype=dtypes.bool)), allow_any_len=True, name="x"), \
@@ -512,7 +531,10 @@ pm_alu_fusion = PatternMatcher([
 ])
 
 isel_matcher = pm_alu_fusion + PatternMatcher([
+  # --- stack packing ---
   (UPat(Ops.STACK, dtypes.int16s+(dtypes.half,dtypes.bfloat16), src=UPat(Ops.LOAD), name="x"), load_into_stack),
+  # TODO: VOP3 is valid, just needs fixed dsl encoding (gpr [0:7], lo/hi in opsel)
+  (UPat(Ops.STACK, (dtypes.half,dtypes.bfloat16), name="x"), true_16_stack),
   # --- control flow ---
   # how to remove positional arg contracts, make inter-lowering semantics explicit
   # so its clear what src args represent. try to match spec
@@ -589,7 +611,9 @@ def encode(ctx, x:UOp):
     return x.val if x.op is Ops.CONST else _fuse(rdefs(x))
   def _fuse(rr:tuple[Register,...]):
     r = _route(rr[0])
-    return r[rr[0].index:rr[0].index+len(rr)-1] if len(rr) > 1 else r[rr[0].index]
+    rs = r[rr[0].index:rr[0].index+len(rr)-1] if len(rr) > 1 else r[rr[0].index]
+    if len(rr) == 1 and rr[0].half > -1: return rs.h if rr[0].half else rs.l
+    return rs
   enc, group, opc, oprs = x.arg, x.arg.func, x.arg.args[0].name.lower(), x.src
   kw = args = None
 

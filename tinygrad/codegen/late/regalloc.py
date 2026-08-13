@@ -126,7 +126,10 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
 
   ndefs = []
   for v in rdefs(x):
-    if isinstance(v, VRegister): ndefs.extend(ctx.reals[i][v])
+    if isinstance(v, VRegister):
+      for r in ctx.reals[i][v]:
+        if v.half is not None: r = Register(r.name, r.index, r.size, v.half)
+        ndefs.append(r)
     else: ndefs.append(v)
   nx = x.replace(src=tuple(nsrc), tag=tuple(ndefs))
 
