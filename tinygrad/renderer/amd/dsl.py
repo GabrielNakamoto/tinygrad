@@ -195,13 +195,24 @@ class VGPRField(SrcField):
   def encode(self, val) -> int:
     if not isinstance(val, Reg): raise TypeError(f"VGPRField requires Reg, got {type(val).__name__}")
     # For 8-bit vdst fields in VOP1/VOP2 16-bit ops, bit 7 is opsel for dest half
-    # print(val, val.hi)
     encoded = super().encode(val)
-    if val.hi and (self.hi - self.lo + 1) == 8:
+    if val.hi and self.lo == 17:
       if encoded >= 128:
         raise ValueError(f"VGPRField: v[{encoded}].h not encodable in 8-bit field (v[0:127] only for .h)")
       encoded |= 0x80
     return encoded
+
+  def __get__(self, obj, objtype=None):
+    if obj is None: return self
+    raw = (obj._raw >> self.lo) & self.mask
+    # NOTE:: better way to check arch?
+    is_rdna3 = "rdna3" in str(obj.__module__)
+    if is_rdna3 and (getattr(obj, "opsel", 0) == 8 or (self.lo == 17 and raw & 0x80)):
+      reg = self.decode(raw & 0x7F)
+      return Reg(reg.offset, obj.op_regs[self.name], hi=True)
+    else:
+      return super().__get__(obj, objtype)
+
 class SGPRField(SrcField): _valid_range = (0, 127)
 class SSrcField(SrcField): _valid_range = (0, 255)
 

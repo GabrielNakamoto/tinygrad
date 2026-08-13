@@ -111,8 +111,11 @@ def true_16_stack(ctx, x:UOp) -> UOp:
   def _strip(u:UOp):
     while u.op is Ops.BITCAST: u=u.src[0]
     return u
+  # may need to promote instruction to 64 bit encoding
+  # to allow 256 16bit vgprs instead of 128?
+  # or derive constraint when alloc vregs
   for i in range(0, len(x.src), 2):
-    lo, hi = _strip(x.src[i]), _strip(x.src[i+1])
+    lo,hi = _strip(x.src[i]), _strip(x.src[i+1])
     lo,hi = lo.replace(tag=(vreg.sub(i//2,0),)), hi.replace(tag=(vreg.sub(i//2,1),))
     mvs.append(hi.after(lo))
   return UOp.group(*mvs, dtype=x.dtype, tag=(vreg,))
@@ -351,21 +354,12 @@ def render_wmma(ctx, wmma:UOp):
 
 # ---- casting utilities -----
 def cvt(ctx, y:UOp, x:UOp):
-  # NOTE: this is hacky
-  def _needcast(x:DType, y:DType): return not (dt_to_isa[x][0] == dt_to_isa[y][0])
-  def _cvt_ins(dtin:DType, dtout:DType):
-    try: return getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[dtout]}_{dt_to_isa[dtin]}_e32")
-    except Exception as e: raise Exception(f"isa doesn't support requested cast from: {dtin} -> {dtout}")
-
-  if x.dtype in dtypes.int64s and y.dtype.itemsize == 4: # b32 -> b64
-    targ = dtypes.uint32 if dtypes.is_unsigned(x.dtype) else dtypes.int32
-    lo = y.ins(_cvt_ins(y.dtype, targ)) if _needcast(y.dtype, targ) else y
-    return to_vgpr(UOp(Ops.STACK, src=(lo, const(0, targ))))
-  elif y.dtype in dtypes.int64s and x.dtype.itemsize == 4: # b64 -> b32
-    src = dtypes.uint32 if dtypes.is_unsigned(y.dtype) else dtypes.int32
-    if _needcast(src, x.dtype): return x.ins(_cvt_ins(src, x.dtype), src=(y.index(0),))
-    else: return y.index(0)
-  return x.ins(_cvt_ins(y.dtype,x.dtype))
+  try:
+    enc = 64 if (r := rdef(x)) and r.half is not None else 32
+    # enc = 32
+    return x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e{enc}"))
+  except Exception as e:
+    raise Exception(f"isa doesn't support requested cast from: {dtin} -> {dtout}")
 
 def int_to_int64(y:UOp, tdt:DType):
   hi = vmov(const(0)) if dtypes.is_unsigned(y.dtype) else getsign(to_vgpr(y), y.dtype.itemsize*8)
