@@ -201,13 +201,18 @@ def fold_address(x:UOp): return fold_lds(*x.src[:2]) if x.addrspace is AddrSpace
 def load(ctx, x:UOp, idx:UOp):
   if idx.addrspace is AddrSpace.REG:
     return x.replace(tag=ctx.regptr(idx, GP_VGPRS, width=(idx.dtype.itemsize+3)//4)) if x.tag is None else None
+  aidx = idx
+  while idx.op is Ops.AFTER: idx = idx.src[0]
   n = idx.src[-1].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.src[0].dtype.itemsize
   suffix = "b" if sz > 2 else "u" if dtypes.is_unsigned(x.dtype) or dtypes.is_float(x.dtype) else "i"
   prefix = "global" if idx.addrspace is AddrSpace.GLOBAL else "ds"
   opc = getattr(RDNA3Ops, f"{prefix}_load_{suffix}{sz*8}")
   vp = ctx.vreg(GP_VGPRS, width=(sz+3)//4)
-  return x.replace(src=(UOp(Ops.NOOP, src=fold_address(idx), arg=opc), *x.src[1:]), tag=(vp,))
+  folded = UOp(Ops.NOOP, src=fold_address(idx), arg=opc)
+  # re-wrap after to preserve scheduling
+  if aidx.op is Ops.AFTER: folded = folded.replace(src=(folded.src[0].after(*aidx.src[1:]),)+folded.src[1:])
+  return x.replace(src=(folded, *x.src[1:]), tag=(vp,))
 
 def lower_gated_load(ctx, x:UOp, addr:UOp, alt:UOp, gate:UOp):
   init = [ctx.ren.copy(s, rdef(x).sub(i)) for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.copy(alt, rdef(x))]
@@ -524,7 +529,7 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
   (UPat.var("y").cast(name="x"), lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e32"))),
   # --- mem ops ---
   (UPat((Ops.INDEX, Ops.SHRINK), name="idx").store(UPat.var("val"), allow_any_len=True).named("x"), store),
-  (UPat((Ops.INDEX, Ops.SHRINK), name="idx").or_after().load(allow_any_len=True, name="x"), lambda ctx,x,idx: load(ctx, x, idx)),
+  (UPat((Ops.INDEX, Ops.SHRINK)).or_after("idx").load(allow_any_len=True, name="x"), lambda ctx,x,idx: load(ctx, x, idx)),
   # --- other ---
   (UPat((Ops.SPECIAL, Ops.PARAM), name="x"), lambda ctx,x: abi(ctx,x)
     if not any(isinstance(v,(VRegister, Register)) for v in rdefs(x)) else None),
