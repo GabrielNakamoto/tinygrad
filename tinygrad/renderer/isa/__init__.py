@@ -9,6 +9,7 @@ class Register:
   name: str
   index: int
   size: int = 8
+  half: int = -1
   def __repr__(self): return self.name
   def __hash__(self): return hash(self.name) * 256 + self.index
 
@@ -21,11 +22,13 @@ class VRegister:
   alignment: int = 1
   parent: VRegister|None = None
   pos: int|None = None
+  half: int|None = None
   def __repr__(self): return self.name
   def is_sub(self) -> bool: return self.parent is not None
-  def sub(self, i:int) -> VRegister:
-    assert i < self.width, f"sub-register index out of width range ({i} >= {self.width})"
-    return VRegister(f"{self.name}.{i}", self.cons, self.width, self.alignment, self, i)
+  def sub(self, i:int, half:int|None=None) -> VRegister:
+    if half is None:
+      assert i < self.width, f"sub-register index out of width range ({i} >= {self.width})"
+    return VRegister(f"{self.name}.{i}", self.cons, self.width, self.alignment, self, i, half)
   @functools.cached_property
   def _hash(self): return hash((self.name, len(self.cons), self.width, self.alignment, self.pos, (self.parent.name if self.parent else None)))
   def __hash__(self): return self._hash
