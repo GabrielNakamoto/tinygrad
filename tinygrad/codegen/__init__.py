@@ -471,6 +471,10 @@ def do_to_program(ast:UOp, renderer:Renderer) -> UOp:
     assert isinstance(ast.arg, KernelInfo), "requires KernelInfo on arg to to_program"
     full_sink = full_rewrite_to_sink(ast, renderer, optimize=ast.tag is None)
     prog_info = ProgramInfo.from_sink(full_sink, renderer.target)
+
+    from tinygrad.codegen.late.interleave import WMMASchedulePolicy, pm_schedule_interleave_wmma
+    full_sink = graph_rewrite(full_sink, pm_schedule_interleave_wmma, ctx=WMMASchedulePolicy(full_sink), name="wmma schedule")
+
     # instruction selection
     if isinstance(renderer, ISARenderer):
       full_sink = renderer.early(full_sink)
