@@ -17,15 +17,16 @@ class WMMASchedulePolicy:
           if l.op is Ops.LOAD and l.src[0].addrspace is not AddrSpace.REG:
             loads_into.setdefault(u, set()).add(l)
 
-    sched_groups: dict[tuple[UOp,...], list[UOp]] = {}
+    sched_groups: dict[frozenset[UOp], list[UOp]] = {}
     for w,ls in loads_into.items():
-      sched_groups.setdefault(tuple(ls), []).append(w)
+      sched_groups.setdefault(frozenset(ls), []).append(w)
 
     if len(sched_groups) == 0: return
 
     done: list[UOp] = list(sched_groups.values())[0]
     for ls,ws in list(sched_groups.items())[1:]:
-      for l in ls: self.schedule_past[l] = done
+      deps = tuple(done)
+      for l in ls: self.schedule_past[l] = deps
       done.extend(ws)
 
 pm_schedule_interleave_wmma = PatternMatcher([

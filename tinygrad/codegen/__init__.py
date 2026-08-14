@@ -473,7 +473,7 @@ def do_to_program(ast:UOp, renderer:Renderer) -> UOp:
     full_sink = full_rewrite_to_sink(ast, renderer, optimize=ast.tag is None)
     prog_info = ProgramInfo.from_sink(full_sink, renderer.target)
 
-    full_sink = graph_rewrite(full_sink, pm_schedule_interleave_wmma, ctx=WMMASchedulePolicy(full_sink), name="wmma schedule")
+    full_sink = graph_rewrite(full_sink, pm_schedule_interleave_wmma, ctx=WMMASchedulePolicy(full_sink), name="wmma schedule", walk=True)
 
     # instruction selection
     if isinstance(renderer, ISARenderer):
