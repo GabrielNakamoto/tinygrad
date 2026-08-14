@@ -524,7 +524,7 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
   (UPat.var("y").cast(name="x"), lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e32"))),
   # --- mem ops ---
   (UPat((Ops.INDEX, Ops.SHRINK), name="idx").store(UPat.var("val"), allow_any_len=True).named("x"), store),
-  (UPat((Ops.INDEX, Ops.SHRINK), name="idx").load(allow_any_len=True, name="x"), lambda ctx,x,idx: load(ctx, x, idx)),
+  (UPat((Ops.INDEX, Ops.SHRINK), name="idx").or_after().load(allow_any_len=True, name="x"), lambda ctx,x,idx: load(ctx, x, idx)),
   # --- other ---
   (UPat((Ops.SPECIAL, Ops.PARAM), name="x"), lambda ctx,x: abi(ctx,x)
     if not any(isinstance(v,(VRegister, Register)) for v in rdefs(x)) else None),

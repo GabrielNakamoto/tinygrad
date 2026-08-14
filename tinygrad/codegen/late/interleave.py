@@ -27,14 +27,15 @@ class WMMASchedulePolicy:
           overlaps[w]=ow
 
     # for all blocks but the first insert AFTER targeting both previous overlapping WMMAs
-    self.schedule_past: dict[UOp, tuple[UOp,UOp]] = {}
-    scheds = list(overlaps.items())
-    for i,(a,b) in enumerate(scheds):
-      if i == 0: continue
-      self.schedule_past[b] = self.schedule_past[a] = scheds[i-1]
 
-    print(len(self.schedule_past))
+    # the after needs to go on the loads
+    self.schedule_past: dict[UOp, tuple[UOp,...]] = {}
+    scheds = list(overlaps.items())
+    for i,(a,_) in enumerate(scheds):
+      if i == 0: continue
+      for l in loads_into[a]:
+        self.schedule_past[l] = scheds[i-1]
 
 pm_schedule_interleave_wmma = PatternMatcher([
-  (UPat(Ops.WMMA, name="w"), lambda ctx,w: w.after(*ctx.schedule_past[w]) if w in ctx.schedule_past else None),
+  (UPat(Ops.LOAD, name="x"), lambda ctx,x: x.replace(src=(x.src[0].after(*ctx.schedule_past[x]),)+x.src[1:]) if x in ctx.schedule_past else None),
 ])
