@@ -329,11 +329,13 @@ def where(pred:UOp, a:UOp, b:UOp, x:UOp):
   return _vop3(x.ins(ins, src=(b,a,pred)))
 
 def render_wmma(ctx, wmma:UOp):
-  a,b,acc = wmma.src
+  # a,b,acc = wmma.src
   srcdt = dt_to_isa[wmma.arg[1]]
   if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
   ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
-  return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(ctx.vreg(GP_VGPRS, width=8),))
+  # final lowering delayed till linearized graph
+  return wmma.replace(arg=ins, tag=(ctx.vreg(GP_VGPRS, width=8),))
+  # return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(ctx.vreg(GP_VGPRS, width=8),))
 
 # ---- casting utilities -----
 def int_to_int64(y:UOp, tdt:DType):
@@ -525,7 +527,7 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
     if x.dtype.itemsize < 8 else bitwise64(ctx, x, getattr(RDNA3Ops, f"v_{x.op.name.lower()}_b32_e32"))),
   (UPat.var("pred").where(UPat.var("a"), UPat.var("b")).named("x"), where),
   (UPat(GroupOp.Binary|GroupOp.Unary, name="x"), alu),
-  (UPat(Ops.WMMA, name="wmma"), render_wmma),
+  (UPat(Ops.WMMA, name="w"), lambda ctx,w: render_wmma(ctx,w) if rdef(w) is None else None),
   (UPat.var("y").cast(name="x"), lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e32"))),
   # --- mem ops ---
   (UPat((Ops.INDEX, Ops.SHRINK), name="idx").store(UPat.var("val"), allow_any_len=True).named("x"), store),
@@ -543,6 +545,7 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
 ])
 
 pre_regalloc_matcher = PatternMatcher([
+  (UPat(Ops.WMMA, name="w"), lambda w: ((nx := w.ins(w.arg)), [nx])),
   (UPat(Ops.PARAM, name="x"), lambda ctx,x: ((nx := x.ins(RDNA3Ops.s_load_b32 if x.addrspace is AddrSpace.ALU else RDNA3Ops.s_load_b64)), [nx])),
   # Lower a gated load as one adjacent sequence after linearization so the alt initialization cannot escape its CFG block.
   (UPat(Ops.LOAD, src=(UPat(Ops.NOOP, name="addr"), UPat.var("alt"), UPat.var("gate")), name="x"), lower_gated_load),
