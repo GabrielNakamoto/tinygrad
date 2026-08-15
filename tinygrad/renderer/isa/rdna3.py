@@ -350,14 +350,16 @@ def where(pred:UOp, a:UOp, b:UOp, x:UOp):
   ins = RDNA3Ops.v_cndmask_b32_e64 if x.dtype.itemsize >= 4 else RDNA3Ops.v_cndmask_b16
   return _vop3(x.ins(ins, src=(b,a,pred)))
 
+# How to make reg store in place to prevent delayed register pressure from stores?
 def render_wmma(ctx, wmma:UOp):
-  # a,b,acc = wmma.src
+  a,b,acc = wmma.src
   srcdt = dt_to_isa[wmma.arg[1]]
+  # invariant tie to acc
+  if rdef(acc) is None: return None
   if wmma.arg[1] in dtypes.int8s: srcdt = "iu8"
   ins = getattr(RDNA3Ops, f"v_wmma_{dt_to_isa[wmma.dtype]}_16x16x16_{srcdt}")
   # final lowering delayed till linearized graph
-  return wmma.replace(arg=ins, tag=(ctx.vreg(GP_VGPRS, width=8),))
-  # return UOp(Ops.INS, arg=ins, dtype=wmma.dtype, src=(a,b,acc), tag=(ctx.vreg(GP_VGPRS, width=8),))
+  return wmma.replace(arg=ins, tag=acc.tag)
 
 # ---- casting utilities -----
 def cvt(ctx, y:UOp, x:UOp):
