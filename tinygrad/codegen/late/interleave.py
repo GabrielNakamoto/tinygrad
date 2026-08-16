@@ -1,6 +1,11 @@
 from tinygrad.uop import Ops
 from tinygrad.uop.ops import AddrSpace, PatternMatcher, UPat, UOp
 
+# heuristics:
+#   - scheduled by fixed shared operand (A) of WMMAs
+#   - track other load dependencies and schedule lazily
+#   - also track WMMA reg stores to schedule at end of each group
+#   to end reg lifetimes (bit of a hack, would be solved if reg buf semantics were correct)
 class WMMASchedulePolicy:
   def __init__(self, sink:UOp):
     self.schedule_past: dict[UOp, tuple[UOp,...]] = {}
@@ -27,13 +32,7 @@ class WMMASchedulePolicy:
           w = u.src[1].src[0]
           if w.op is not Ops.WMMA: continue
           wmma_consumers.setdefault(w, []).append(u)
-
-    # heuristics:
-    # - scheduled by fixed shared operand (A) of WMMAs
-    # - track other load dependencies and schedule lazily
-    # - also track WMMA reg stores to schedule at end of each group
-    # to end reg lifetimes (bit of a hack, would be solved if reg
-    # buffer semantics were correct)
+    if len(wmma_deps) < 4: return
 
     sched_groups: dict[frozenset[UOp], list[UOp]] = {}
     wmma_a_deps = {k:v[0] for k,v in wmma_deps.items()}
@@ -42,8 +41,6 @@ class WMMASchedulePolicy:
       best = max((l.intersection(ls) for l in wmma_a_deps.values() if l is not ls), key=lambda lis: len(lis))
       sched_groups.setdefault(frozenset(best), []).append(w)
 
-    # TODO: try search, optimally orient the placements to minimize peak pressure?
-    if len(sched_groups) == 0: return
     groups = list(sched_groups.values())
     scheduled: set[UOp] = set()
     wmmas: list[UOp] = []
