@@ -13,10 +13,6 @@ class Register:
   def __hash__(self): return hash(self.name) * 256 + self.index
 
 @dataclass(frozen=True)
-class Phi:
-  edges: tuple[VRegister,...]
-
-@dataclass(frozen=True)
 class VRegister:
   name: str
   cons: tuple[Register, ...] = field(default_factory=tuple)
@@ -24,6 +20,7 @@ class VRegister:
   alignment: int = 1
   parent: VRegister|None = None
   pos: int|None = None
+  phi: tuple[VRegister,...]|None = None
   def __repr__(self): return self.name
   def is_sub(self) -> bool: return self.parent is not None
   def sub(self, i:int) -> VRegister:
@@ -55,15 +52,6 @@ class PreRegallocContext:
       if u.op is Ops.SPECIAL: return (2, u.arg)
       return (0, u.arg.slot) if u.arg.addrspace is not None else (1, u.expr)
     self.func_args = sorted([u for u in self.uses if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
-    self.regbufs: dict[tuple[UOp, int], VRegister] = {} # maps regbuf ptr to cached vregister
-
-  def vreg(self, cons:tuple[Register, ...], **kwargs) -> VRegister:
-    return VRegister(f"vr{next(self.reg_n)}", cons if isinstance(cons, tuple) else (cons,), **kwargs)
-  def regptr(self, idx:UOp, cons:tuple[Register, ...], **kwargs) -> tuple[VRegister,...]:
-    buf = idx.src[0]
-    while buf.op is Ops.AFTER: buf = buf.src[0]
-    idxs = (idx.src[1].src[0].val,) if idx.op is Ops.INDEX else range(idx.src[-1].src[0].val)
-    return tuple(self.regbufs.setdefault((buf,i), self.vreg(cons, **kwargs)) for i in idxs)
 
 class ISARenderer(Renderer):
   pre_isel_matcher: PatternMatcher
@@ -75,6 +63,10 @@ class ISARenderer(Renderer):
   # NOTE: would be nice for this to be cached automatically like in UOp.ins() or something?
   # instead of needing to manually register important instructions in each renderer impl
   semantic_op: dict[any, UOp] = {} # preserve IR metadata post-isel
+  reg_n = itertools.count()
+
+  def vreg(self, cons:tuple[Register, ...], **kwargs) -> VRegister:
+    return VRegister(f"vr{next(self.reg_n)}", cons if isinstance(cons, tuple) else (cons,), **kwargs)
 
   def is_two_address(self, x:UOp) -> bool: return False
   def stack_alloc(self, uops:list[UOp]) -> list[UOp]: return uops

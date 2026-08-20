@@ -18,7 +18,7 @@ from tinygrad.codegen.decomp.dtype import pm_dtype_decomps
 from tinygrad.codegen.decomp.op import get_late_rewrite_patterns, get_simplifying_rewrite_patterns
 from tinygrad.codegen.decomp.transcendental import get_transcendental_patterns
 from tinygrad.codegen.late.coalesce import indexing_simplify
-from tinygrad.codegen.late.mem2reg import Mem2regContext
+from tinygrad.codegen.late.mem2reg import Mem2regContext, pm_promote_regbufs
 from tinygrad.codegen.opt.postrange import apply_opts
 from tinygrad.codegen.late.gater import pm_move_gates_from_index
 from tinygrad.codegen.simplify import pm_simplify_ranges, pm_flatten_range, pm_split_ranges, pm_load_collapse, pm_reduce_unparented
@@ -427,7 +427,7 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     if ctx.pre_regalloc_matcher is not None: lst = line_rewrite(lst, ctx.pre_regalloc_matcher, ctx.pre_regalloc_context)
     # register definitions (INS without srcs) move to the top so regalloc sees their live ranges span the whole program (callee saved regs)
     lst = sorted(lst, key=lambda u: u.op is not Ops.INS or bool(u.src))
-    Mem2regContext(lst, ctx)
+    lst = line_rewrite(lst, pm_promote_regbufs, Mem2regContext(lst, ctx))
     regalloc_ctx = LinearScanRegallocContext(lst, ctx)
     lst = line_rewrite(lst, pm_regalloc_rewrite, regalloc_ctx)
     lst = ctx.stack_alloc(lst)
