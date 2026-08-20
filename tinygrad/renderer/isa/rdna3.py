@@ -489,14 +489,6 @@ post_regalloc_matcher = PatternMatcher([
   (UPat(GroupOp.All - {Ops.INS}, name="x"), lambda x: (x, [])),
 ])
 
-
-# What do REG space loads/stores represent?
-# - buffer is a bunch of vregisters, non-contiguous
-# - every load should reference the last STORE
-# - control flow introduces PHI like behaviour,
-# how to determine which store was last?
-# TODO: look into LLVM mem2reg pass that promotes these refs
-
 def encode(ctx, x:UOp):
   def encfield(x:UOp):
     x = rafter(x)
