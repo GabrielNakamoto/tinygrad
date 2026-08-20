@@ -6,7 +6,7 @@ from tinygrad.renderer.isa import ISARenderer, Register, VRegister, rdefs, rdef
 from tinygrad.dtype import dtypes
 from bisect import bisect_left
 
-REG_OPS = {Ops.LOAD, Ops.INS, Ops.GROUP, Ops.RANGE, Ops.END, Ops.BUFFER, Ops.PARAM, Ops.SPECIAL}
+REG_OPS = {Ops.STORE, Ops.INS, Ops.GROUP, Ops.RANGE, Ops.END, Ops.BUFFER, Ops.PARAM, Ops.SPECIAL}
 
 class LinearScanRegallocContext:
   def vdef(self, v:VRegister) -> UOp: return self.uops[self.live_intervals[v][0]]
@@ -25,6 +25,10 @@ class LinearScanRegallocContext:
       for v in defs: # if lifetime of v ends during range, pick latest range and add to lr
         if (n := max((lr[rv][-1] for rv in range_vars if lr[rv][0] <= lr[v][-1] < lr[rv][-1]), default=None)): lr[v].append(n)
       if u.op is Ops.RANGE: range_vars.append(rdef(u))
+
+    # maps phi edges to merge node
+    # un-optimized pseudo phis for now, just insert copies at rewrite time
+    self.phis: dict[VRegister, tuple[Register,...]] = {}
 
     # allocate registers
     self.stack_size: int = 0
@@ -93,6 +97,9 @@ class LinearScanRegallocContext:
           live[vv] = alloc(vv, cons, i+1 if u.op is not Ops.RANGE else i)
         self.reals.setdefault(i, {})[v] = (live[vv][v.pos],) if v.is_sub() else live[v]
 
+        if v.phi is not None:
+          for e in v.phi: self.phis[e] = self.reals[i][v]
+
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
@@ -129,15 +136,18 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
     else:
       nsrc.append(s)
 
-  ndefs = []
+  ndefs, after, before = [], [], []
   for v in rdefs(x):
-    if isinstance(v, VRegister): ndefs.extend(ctx.reals[i][v])
+    if isinstance(v, VRegister):
+      ndefs.extend(ctx.reals[i][v])
     else: ndefs.append(v)
   nx = x.replace(src=tuple(nsrc), tag=tuple(ndefs))
 
-  after, before = [], []
   for v in rdefs(x):
     if v in ctx.spills: after.extend(ctx.ren.spill(ctx.spills[v],nx))
+    if v in ctx.phis:
+      print("inserting phi merge copy", rdefs(nx), "->", ctx.phis[v])
+      after.append(ctx.ren.copy(nx, *ctx.phis[v]))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
 

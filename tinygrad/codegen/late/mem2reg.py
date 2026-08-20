@@ -16,6 +16,7 @@ class Mem2regContext:
     current: dict[tuple[UOp, int], UOp] = {}
     rng_head: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
     rng_backedge: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
+    # how to make rewrite immune to src edge changes?
     self.rewrite: dict[UOp, tuple[UOp, list[UOp]]] = {}
     for u in lst:
       if u.op in {Ops.RANGE, Ops.END}: print(u.op)
@@ -44,12 +45,16 @@ class Mem2regContext:
             # phi between last flat store and store backedge
             cur, bedge = rdef(self.rewrite[l][0]), rdef(rng_backedge[rng][ptr])
             vr = ren.vreg(cur.cons, width=cur.width, alignment=cur.width, phi=(cur,bedge))
-            print("inserting backedge phi", ptr[0].arg, ptr[1], vr.phi)
+            print("inserting backedge phi", ptr[0].arg, ptr[1], vr, vr.phi)
             phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
-            self.rewrite[u] = (phi, [phi])
+            self.rewrite[l] = (phi, [phi])
 
+def foo(ctx,x):
+  if x not in ctx.rewrite: raise Exception()
+  return ctx.rewrite[x]
 # REG store copy/coalesce is handled by regalloc PHI logic
 # simply rewrite LOADs to equivalent SSA node
 pm_promote_regbufs = PatternMatcher([
-  (UPat(Ops.LOAD, name="x"), lambda ctx,x: ctx.rewrite[x] if x in ctx.rewrite else None),
+  (UPat(Ops.LOAD, name="x"), foo),
+  # (UPat(Ops.LOAD, name="x"), lambda ctx,x: ctx.rewrite[x] if x in ctx.rewrite else None),
 ])
