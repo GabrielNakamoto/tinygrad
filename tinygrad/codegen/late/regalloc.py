@@ -146,7 +146,6 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   for v in rdefs(x):
     if v in ctx.spills: after.extend(ctx.ren.spill(ctx.spills[v],nx))
     if v in ctx.phis:
-      print("inserting phi merge copy", rdefs(nx), "->", ctx.phis[v])
       after.append(ctx.ren.copy(nx, *ctx.phis[v]))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
