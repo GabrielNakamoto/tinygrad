@@ -114,11 +114,6 @@ class LinearScanRegallocContext:
           if v not in live or live[v] != rs: live[v] = fill(v, i, rs)
     self.ren.spill_size = self.stack_size
 
-    for vr in self.spills.keys():
-      u = self.vdef(vr)
-      print(vr, u.op, u.arg)
-
-
 def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   i, nsrc, = next(ctx.idx), []
   for j,s in enumerate(x.src):

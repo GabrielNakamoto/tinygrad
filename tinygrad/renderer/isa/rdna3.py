@@ -148,7 +148,6 @@ def alloc_vregs(ctx, x:UOp) -> UOp|None:
     vreg = ctx.vreg(GP_VGPRS, width=len(x.src))
     # TODO: replace all references to src edges to avoid duplicates because of tag changes
     return x.replace(tag=(vreg,), src=tuple(s.replace(tag=(vreg.sub(i),)) for i,s in enumerate(x.src)))
-
   elif isinstance(x.tag, tuple):
     cons, width = x.tag if isinstance(x.tag[0], tuple) else (x.tag, 1)
     vr = ctx.vreg(cons, width=width)
@@ -194,16 +193,6 @@ def load(ctx, x:UOp, idx:UOp):
   opc = getattr(RDNA3Ops, f"{prefix}_load_{suffix}{sz*8}")
   ctx.ren.semantic_op[opc]=Ops.LOAD
   return x.ins(opc, src=fold_address(idx)+x.src[1:], tag=(ctx.vreg(GP_VGPRS, width=(sz+3)//4),))
-
-# this needs to be fixed, any way to not break SSA without PHI nodes/large refactor?
-def reg_store(ctx, x:UOp, idx:UOp, val:UOp):
-  vregs, i = ctx.regptr(idx, GP_VGPRS, width=(idx.dtype.itemsize+3)//4), idx.src[1].src[0].val
-  if val.op is Ops.GROUP:
-    if idx.dtype.itemsize == 8: return ctx.ren.copy(UOp.group(val.src[i*2], val.src[i*2+1], dtype=idx.dtype), vregs[i])
-    else: return ctx.ren.copy(val.src[i].after(val, idx), vregs[i])
-  else:
-    assert len(vregs) == 1
-    return ctx.ren.copy(val.after(idx).bitcast(val.dtype), *vregs)
 
 def store(ctx, x:UOp, idx:UOp, val:UOp):
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
@@ -463,12 +452,12 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
   (UPat.var("y", dtype=dtypes.ints+dtypes.floats).cast(name="x"),
     lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e32"))),
   # --- mem ops ---
-  (UPat.var("idx").store(UPat.var("val"), allow_any_len=True).named("x"), lambda ctx,x,idx,val: reg_store(ctx,x,idx,val) if
-    idx.addrspace is AddrSpace.REG else store(ctx,x,idx,val)),
+  (UPat.var("idx").store(UPat.var("val"), allow_any_len=True).named("x"), lambda ctx,x,idx,val:
+    store(ctx,x,idx,val) if idx.addrspace is not AddrSpace.REG else
+    x.replace(tag=(ctx.vreg(GP_VGPRS, width=(idx.dtype.itemsize+3)//4),)) if x.tag is None else None),
   # THIS IS VERY BAD, breaks SSA... do we need phi nodes? even if we route load references to previous stores multiple stores breaks...
   (UPat.var("idx").load(name="x", allow_any_len=True), lambda ctx,x,idx:
-    (x.replace(tag=ctx.regptr(idx, GP_VGPRS, width=(idx.dtype.itemsize+3)//4)) if x.tag is None else None)
-    if idx.addrspace is AddrSpace.REG else load(ctx,x,idx)),
+    load(ctx,x,idx) if idx.addrspace is not AddrSpace.REG else None),
   # --- other ---
   (UPat(Ops.SPECIAL, name="x"), lambda x: vmov(def_reg(dtypes.uint32, WGIDS[int(x.arg[-1])])) if x.arg[0] == 'g' else
     x.ins(RDNA3Ops.v_bfe_u32, dtype=dtypes.uint32, src=(def_reg(dtypes.uint32, WIIDS), const(10*int(x.arg[-1])), const(10)))),
@@ -500,6 +489,14 @@ post_regalloc_matcher = PatternMatcher([
   (UPat(GroupOp.All - {Ops.INS}, name="x"), lambda x: (x, [])),
 ])
 
+
+# What do REG space loads/stores represent?
+# - buffer is a bunch of vregisters, non-contiguous
+# - every load should reference the last STORE
+# - control flow introduces PHI like behaviour,
+# how to determine which store was last?
+# TODO: look into LLVM mem2reg pass that promotes these refs
+
 def encode(ctx, x:UOp):
   def encfield(x:UOp):
     x = rafter(x)
@@ -511,8 +508,6 @@ def encode(ctx, x:UOp):
     base = next(v for k,v in dmap.items() if k in r.name)
     return base[r.index] if len(rs) == 1 else base[r.index:r.index+len(rs)-1]
   group, kw, args = x.arg.func, None, None
-
-  # print("encoding", x.arg.args[0].name.lower(), rdefs(x), [(s.op,s.arg,rdefs(s)) for s in x.src])
 
   # TODO: use match, clean up
   if group is RDNA3Ops.SMEM: kw = dict(sdata=encfield(x), sbase=encfield(x.src[0]), offset=encfield(x.src[1]))

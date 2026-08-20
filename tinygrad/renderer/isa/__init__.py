@@ -12,7 +12,10 @@ class Register:
   def __repr__(self): return self.name
   def __hash__(self): return hash(self.name) * 256 + self.index
 
-# TODO: iter over subregisters
+@dataclass(frozen=True)
+class Phi:
+  edges: tuple[VRegister,...]
+
 @dataclass(frozen=True)
 class VRegister:
   name: str
