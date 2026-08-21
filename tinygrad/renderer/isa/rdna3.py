@@ -204,7 +204,7 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
 
 def lower_gated_load(ctx, x:UOp):
   alt, gate = x.src[-2:]
-  init = [ctx.ren.copy(s, rdef(x).sub(i)) for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.copy(alt, rdef(x))]
+  init = [ctx.ren.vcopy(s, rdef(x).sub(i)) for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.vcopy(alt, rdef(x))]
   mask = UOp(Ops.INS, arg=RDNA3Ops.s_and_saveexec_b32, src=(gate,), tag=(ctx.ren.vreg(GP_SGPRS),))
   x = x.replace(src=x.src[:-2])
   return x, init + [mask, x, restoreexec(mask)]
@@ -586,10 +586,13 @@ class RDNA3Renderer(ISARenderer):
       ops.append(UOp(Ops.INS, arg=getattr(RDNA3Ops, f"scratch_load_b{len(block)*rsz}"), src=(const(spill_offset+i*128//rsz),), tag=block))
     return UOp.group(*ops, tag=regs), ops
 
-  def copy(self, u:UOp, r:VRegister|Register) -> UOp:
+  def vcopy(self, u:UOp, r:VRegister) -> UOp:
     if u.dtype.itemsize == 8:
       return UOp.group(vmov(gep(u,0), r.sub(0)), vmov(gep(u,1), r.sub(1)), dtype=u.dtype, tag=(r,))
     return vmov(u,r)
+
+  def copy(self, u:UOp, regs:tuple[Register,...]) -> list[UOp]:
+    return [vmov(def_reg(u.dtype, rs),rd) for rs,rd in zip(rdefs(u), regs)]
 
   def asm(self, prg:UOp, lin:UOp) -> bytes:
     deps: set[Register] = set()

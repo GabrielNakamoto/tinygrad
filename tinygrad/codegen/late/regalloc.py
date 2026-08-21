@@ -17,18 +17,20 @@ class LinearScanRegallocContext:
     lr = self.live_intervals
     range_vars: list[VRegister] = []
     def live_edge(u:UOp) -> tuple[VRegister,...]: return tuple(r.parent if r.is_sub() else r for r in rdefs(u) if isinstance(r, VRegister))
+    phi_edges: dict[VRegister, VRegister] = {}
     for i, u in enumerate(reversed(self.uops)):
       defs, uses = live_edge(u), []
       for s in dedup(u.src): uses.extend(live_edge(s))
       for v in defs + tuple(uses):
         lr.setdefault(v, []).insert(0, len(self.uops) - i - 1)
       for v in defs: # if lifetime of v ends during range, pick latest range and add to lr
+        if v.phi is not None:
+          for e in v.phi: phi_edges[e]=v
         if (n := max((lr[rv][-1] for rv in range_vars if lr[rv][0] <= lr[v][-1] < lr[rv][-1]), default=None)): lr[v].append(n)
       if u.op is Ops.RANGE: range_vars.append(rdef(u))
 
-    # maps phi edges to merge node
-    # un-optimized pseudo phis for now, just insert copies at rewrite time
-    self.phis: dict[VRegister, tuple[Register,...]] = {}
+    # instrument copy constraints to lifetime
+    for e,v in phi_edges.items(): lr[v] = sorted(lr[v] + [lr[e][0]])
 
     # allocate registers
     self.stack_size: int = 0
@@ -38,6 +40,10 @@ class LinearScanRegallocContext:
     self.insert_before: dict[int, list[tuple[Register, tuple[Register,...]]]] = {} # fills to be inserted at each program point
     live: dict[VRegister, tuple[Register,...]] = {} # mapping from virtual to real that's currently assigned to it
     live_ins: list[dict[VRegister, tuple[Register,...]]] = [] # mapping from virtual to real at loop entry
+    # maps phi paths to node registers at merge point
+    # emits copy at rewrite time, taken path at runtime will emit the last copy
+    # TODO: coalesce redundant copies
+    self.phis: dict[VRegister, tuple[Register,...]] = {}
 
     # allocate the best register. Registers not in live or not used again are free and have priority,
     # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
@@ -76,7 +82,9 @@ class LinearScanRegallocContext:
         if not isinstance(v:=rdef(s), VRegister): continue
         vv = v.parent if v.is_sub() else v
         # fill at sub-register level, contiguous constraint only needed for the parent register
-        if vv not in live: live[vv] = fill(vv,i,pos=v.pos)
+        if vv not in live:
+          print("filling", vv)
+          live[vv] = fill(vv,i,pos=v.pos)
         self.reals.setdefault(i, {})[v] = (live[vv][v.pos],) if v.is_sub() else live[vv]
 
       # allocate defs
@@ -84,6 +92,10 @@ class LinearScanRegallocContext:
         if not isinstance(v, VRegister): continue
         if v.is_sub() and (vp := v.parent) in live:
           self.reals.setdefault(i, {})[v] = (live[vp][v.pos],)
+          continue
+        if v.phi is not None:
+          assert v in live, "phi is early allocated"
+          self.reals.setdefault(i, {})[v] = live[v]
           continue
         cons = None
         if ren.is_two_address(u) and j == 0:
@@ -97,13 +109,15 @@ class LinearScanRegallocContext:
           live[vv] = alloc(vv, cons, i+1 if u.op is not Ops.RANGE else i)
         self.reals.setdefault(i, {})[v] = (live[vv][v.pos],) if v.is_sub() else live[v]
 
-        if v.phi is not None:
-          for e in v.phi: self.phis[e] = self.reals[i][v]
+        # greedy alloc first edge to phi to ensure copy lifetime
+        if (phi := phi_edges.get(v, None)):
+          if phi in live: self.phis[v] = live[phi]
+          else: self.phis[v] = live[phi] = alloc(phi, None, i)
 
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
-        used_in_loop = [v for v in live.keys() | self.spills.keys() if any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
+        used_in_loop = [v for v in live.keys() | self.spills.keys() if v.phi is None and any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
         sorted_uses = sorted(used_in_loop, key=lambda k: (next(l-i for l in lr[k] if l >= i), lr[k][0], k.name, k.cons[0].index))
         live_in: dict[VRegister, tuple[Register,...]] = {}
         for v in sorted_uses:
@@ -138,15 +152,13 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
 
   ndefs, after, before = [], [], []
   for v in rdefs(x):
-    if isinstance(v, VRegister):
-      ndefs.extend(ctx.reals[i][v])
+    if isinstance(v, VRegister): ndefs.extend(ctx.reals[i][v])
     else: ndefs.append(v)
   nx = x.replace(src=tuple(nsrc), tag=tuple(ndefs))
 
   for v in rdefs(x):
+    if v in ctx.phis: after.extend(ctx.ren.copy(nx, ctx.phis[v]))
     if v in ctx.spills: after.extend(ctx.ren.spill(ctx.spills[v],nx))
-    if v in ctx.phis:
-      after.append(ctx.ren.copy(nx, *ctx.phis[v]))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
 
