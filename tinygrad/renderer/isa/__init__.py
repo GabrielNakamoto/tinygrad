@@ -20,7 +20,6 @@ class VRegister:
   alignment: int = 1
   parent: VRegister|None = None
   pos: int|None = None
-  phi: tuple[VRegister,...]|None = None
   def __repr__(self): return self.name
   def is_sub(self) -> bool: return self.parent is not None
   def sub(self, i:int) -> VRegister:

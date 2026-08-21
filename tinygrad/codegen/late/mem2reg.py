@@ -45,7 +45,7 @@ class Mem2regContext:
             for i,u in enumerate(ops):
               if u.op is Ops.LOAD and (carry := next((s for s in reversed(ops[i+1:]) if s.op is Ops.STORE), None)) is not None:
                 lin,n = flat[ptr][u]
-                vr = ren.vreg(lin.cons, width=lin.width, alignment=lin.alignment, phi=(lin,rdef(carry)))
+                vr = ren.vreg(lin.cons, width=lin.width, alignment=lin.alignment)
                 phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
                 self.phis[(ptr, n)] = phi
                 self.phi_copies[lin] = self.phi_copies[rdef(carry)] = vr

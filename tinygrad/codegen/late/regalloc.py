@@ -78,9 +78,6 @@ class LinearScanRegallocContext:
       # allocate defs
       for j,v in enumerate(rdefs(u)):
         if not isinstance(v, VRegister): continue
-        if v.is_sub() and (vp := v.parent) in live:
-          self.reals.setdefault(i, {})[v] = (live[vp][v.pos],)
-          continue
         cons = None
         if ren.is_two_address(u) and j == 0:
           uses = []
@@ -96,7 +93,7 @@ class LinearScanRegallocContext:
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
-        used_in_loop = [v for v in live.keys() | self.spills.keys() if v.phi is None and any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
+        used_in_loop = [v for v in live.keys() | self.spills.keys() if any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
         sorted_uses = sorted(used_in_loop, key=lambda k: (next(l-i for l in lr[k] if l >= i), lr[k][0], k.name, k.cons[0].index))
         live_in: dict[VRegister, tuple[Register,...]] = {}
         for v in sorted_uses:
@@ -136,7 +133,8 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   nx = x.replace(src=tuple(nsrc), tag=tuple(ndefs))
 
   for v in rdefs(x):
-    if v in ctx.spills: after.extend(ctx.ren.spill(ctx.spills[v],nx))
+    if v in ctx.spills and x.op is not Ops.BUFFER:
+      after.extend(ctx.ren.spill(ctx.spills[v],nx))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
 
