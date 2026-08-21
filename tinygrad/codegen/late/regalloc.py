@@ -44,6 +44,7 @@ class LinearScanRegallocContext:
     # emits copy at rewrite time, taken path at runtime will emit the last copy
     # TODO: coalesce redundant copies
     self.phis: dict[VRegister, tuple[Register,...]] = {}
+    phi_regs: dict[VRegister, tuple[Register,...]] = {}
 
     # allocate the best register. Registers not in live or not used again are free and have priority,
     # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
@@ -111,8 +112,8 @@ class LinearScanRegallocContext:
 
         # greedy alloc first edge to phi to ensure copy lifetime
         if (phi := phi_edges.get(v, None)):
-          if phi in live: self.phis[v] = live[phi]
-          else: self.phis[v] = live[phi] = alloc(phi, None, i)
+          if phi not in phi_regs: phi_regs[phi] = live[phi] = alloc(phi, None, i)
+          self.phis[v] = phi_regs[phi]
 
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
