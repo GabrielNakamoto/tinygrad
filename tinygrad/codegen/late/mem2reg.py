@@ -15,18 +15,20 @@ class Mem2regContext:
   # stores that occur between load and one or more backedges
   def __init__(self, lst:list[UOp], ren:Renderer):
     assert isinstance(ren, ISARenderer), "mem2reg only supported for assembly backends"
-    # TODO: simplify all these data structures...
     self.ren = ren
     self.current: dict[UOp, UOp] = {}
     self.nl: dict[tuple[UOp, int], int] = {}
+
     lane_ctr = itertools.count()
     rng_stack: list[UOp] = []
     current: dict[tuple[UOp, int], UOp] = {}
+    # NOTE: could calculate this better by just saving all ops
+    # that happen in a rng and analyzing at END
     rng_head: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
     rng_backedge: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
-    flat: dict[UOp, UOp] = {}
+    # loads -> last store
+    flat: dict[tuple[UOp, int], dict[UOp, UOp]] = {}
     self.phis: dict[tuple[tuple[UOp, int], int], UOp] = {}
-    n: dict[tuple[UOp, int], int] = {}
     nl: dict[UOp, int] = {}
     for u in lst:
       if u.op in {Ops.STORE, Ops.LOAD}:
@@ -42,16 +44,15 @@ class Mem2regContext:
             rng_backedge.setdefault(rng, {})[(buf,i)] = u
         if u.op is Ops.STORE: current[(buf,i)] = u
         if u.op is Ops.LOAD:
-          n[(buf,i)] = n.setdefault((buf,i), 0) + 1
-          nl[u] = n[(buf,i)]
-          flat[u] = current[(buf,i)]
+          flat.setdefault((buf,i), {})[u] = current[(buf,i)]
+          nl[u] = len(flat[(buf,i)])
       if u.op is Ops.RANGE: rng_stack.append(u)
       if u.op is Ops.END:
         if (rng := rng_stack.pop()) in rng_head:
           for ptr,l in rng_head.pop(rng).items():
             if rng in rng_backedge and ptr in rng_backedge[rng]:
               # phi between last flat store and store backedge
-              cur, bedge = rdef(flat[l]), rdef(rng_backedge[rng][ptr])
+              cur, bedge = rdef(flat[ptr][l]), rdef(rng_backedge[rng][ptr])
               vr = ren.vreg(cur.cons, width=cur.width, alignment=cur.alignment, phi=(cur,bedge))
               phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
               self.phis[(ptr, nl[l])] = phi
