@@ -22,40 +22,31 @@ class Mem2regContext:
     lane_ctr = itertools.count()
     rng_stack: list[UOp] = []
     current: dict[tuple[UOp, int], UOp] = {}
-    # NOTE: could calculate this better by just saving all ops
-    # that happen in a rng and analyzing at END
-    rng_head: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
-    rng_backedge: dict[UOp, dict[tuple[UOp, int], UOp]] = {}
-    # loads -> last store
-    flat: dict[tuple[UOp, int], dict[UOp, UOp]] = {}
     self.phis: dict[tuple[tuple[UOp, int], int], UOp] = {}
-    nl: dict[UOp, int] = {}
+    flat: dict[tuple[UOp, int], dict[UOp, tuple[VRegister, int]]] = {}
+    rng_ctx: dict[UOp, dict[tuple[UOp, int], list[UOp]]] = {}
+
     for u in lst:
       if u.op in {Ops.STORE, Ops.LOAD}:
-        buf, i = bptr(u.src[0])
-        if buf.addrspace is not AddrSpace.REG: continue
-        # register first load and last store of each range
+        ptr = bptr(u.src[0])
+        if ptr[0].addrspace is not AddrSpace.REG: continue
         if len(rng_stack):
-          rng = rng_stack[-1]
-          if u.op is Ops.LOAD and (buf,i) not in rng_head.setdefault(rng, {}):
-            if rng in rng_backedge and (buf,i) in rng_backedge[rng]: rng_backedge[rng].pop((buf,i))
-            rng_head[rng][(buf,i)]=u
-          if u.op is Ops.STORE:
-            rng_backedge.setdefault(rng, {})[(buf,i)] = u
-        if u.op is Ops.STORE: current[(buf,i)] = u
+          rng_ctx.setdefault(rng_stack[-1], {}).setdefault(ptr, []).append(u)
+        if u.op is Ops.STORE: current[ptr] = u
         if u.op is Ops.LOAD:
-          flat.setdefault((buf,i), {})[u] = current[(buf,i)]
-          nl[u] = len(flat[(buf,i)])
+          if ptr not in flat: flat[ptr] = {}
+          flat[ptr][u] = (rdef(current[ptr]), len(flat[ptr])+1)
+
       if u.op is Ops.RANGE: rng_stack.append(u)
       if u.op is Ops.END:
-        if (rng := rng_stack.pop()) in rng_head:
-          for ptr,l in rng_head.pop(rng).items():
-            if rng in rng_backedge and ptr in rng_backedge[rng]:
-              # phi between last flat store and store backedge
-              cur, bedge = rdef(flat[ptr][l]), rdef(rng_backedge[rng][ptr])
-              vr = ren.vreg(cur.cons, width=cur.width, alignment=cur.alignment, phi=(cur,bedge))
-              phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
-              self.phis[(ptr, nl[l])] = phi
+        if (ctx := rng_ctx.get(rng_stack.pop(), None)):
+          for ptr,ops in ctx.items():
+            for i,u in enumerate(ops):
+              if u.op is Ops.LOAD and (carry := next((s for s in reversed(ops[i+1:]) if s.op is Ops.STORE), None)) is not None:
+                lin,n = flat[ptr][u]
+                vr = ren.vreg(lin.cons, width=lin.width, alignment=lin.alignment, phi=(lin,rdef(carry)))
+                phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
+                self.phis[(ptr, n)] = phi
 
   def try_phi(self, idx:UOp, x:UOp) -> UOp|None:
     ptr = bptr(idx)
