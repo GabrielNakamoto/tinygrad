@@ -18,6 +18,7 @@ class Mem2regContext:
     self.ren = ren
     self.current: dict[UOp, UOp] = {}
     self.nl: dict[tuple[UOp, int], int] = {}
+    self.phi_copies: dict[VRegister, VRegister] = {}
 
     lane_ctr = itertools.count()
     rng_stack: list[UOp] = []
@@ -47,6 +48,7 @@ class Mem2regContext:
                 vr = ren.vreg(lin.cons, width=lin.width, alignment=lin.alignment, phi=(lin,rdef(carry)))
                 phi = UOp.placeholder((1,), ptr[0].dtype, next(lane_ctr), AddrSpace.REG).replace(tag=(vr,))
                 self.phis[(ptr, n)] = phi
+                self.phi_copies[lin] = self.phi_copies[rdef(carry)] = vr
 
   def try_phi(self, idx:UOp, x:UOp) -> UOp|None:
     ptr = bptr(idx)
@@ -56,6 +58,8 @@ class Mem2regContext:
 
 pm_insert_phis = PatternMatcher([
   (UPat.var("idx").load(name="x"), lambda ctx,idx,x: ctx.try_phi(idx, x)),
+  (UPat(Ops.STORE, name="x"), lambda ctx,x: (x, [x, ctx.ren.vcopy(x, ctx.phi_copies[rdef(x)])])
+    if rdef(x) in ctx.phi_copies else None),
 ])
 
 # REG store copy/coalesce is handled by regalloc PHI logic
