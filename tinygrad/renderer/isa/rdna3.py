@@ -537,6 +537,7 @@ class RDNA3LinearCtx:
   exec_mask: dict[UOp, UOp] = field(default_factory=dict)
   range_bnd: dict[UOp, UOp] = field(default_factory=dict)
 
+
 class RDNA3Renderer(ISARenderer):
   device = "AMD"
   pre_isel_matcher = pre_isel_matcher
@@ -556,19 +557,15 @@ class RDNA3Renderer(ISARenderer):
 
   # use scratch memory space for spilling thread local memory, addressed as:
   def spill(self, spill_offset:int, x:UOp) -> list[UOp]:
-    rs, ops = rdefs(x), []
-    rsz = rs[0].size*8
-    for i in range((len(rs)*rsz + 127)//128):
-      block = rs[i:i+(128//rsz)]
-      subset = def_reg(x.dtype, block)
-      ops.append(UOp(Ops.INS, arg=getattr(RDNA3Ops, f"scratch_store_b{len(block)*rsz}"), src=(const(spill_offset+i*128//rsz),subset)))
-    return ops
+    regs = rdefs(x)
+    batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
+    return [UOp(Ops.INS, arg=getattr(RDNA3Ops, f"scratch_store_b{len(b)*32}"), \
+      src=(const(spill_offset+j*16), def_reg(x.dtype, b))) for j,b in enumerate(batches)]
 
   def fill(self, spill_offset:int, x:UOp, regs:tuple[Register,...]) -> tuple[UOp, list[UOp]]:
-    ops, rsz = [], regs[0].size*8
-    for i in range((len(regs)*rsz + 127)//128):
-      block = regs[i:i+(128//rsz)]
-      ops.append(UOp(Ops.INS, arg=getattr(RDNA3Ops, f"scratch_load_b{len(block)*rsz}"), src=(const(spill_offset+i*128//rsz),), tag=block))
+    batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
+    ops = [UOp(Ops.INS, x.dtype, arg=getattr(RDNA3Ops, f"scratch_load_b{len(b)*32}"), \
+      src=(const(spill_offset+j*16),), tag=b) for j,b in enumerate(batches)]
     return UOp.group(*ops, tag=regs), ops
 
   def vcopy(self, u:UOp, r:VRegister) -> UOp:

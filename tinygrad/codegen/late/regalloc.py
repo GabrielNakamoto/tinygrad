@@ -34,6 +34,7 @@ class LinearScanRegallocContext:
     self.insert_before: dict[int, list[tuple[Register, tuple[Register,...]]]] = {} # fills to be inserted at each program point
     live: dict[VRegister, tuple[Register,...]] = {} # mapping from virtual to real that's currently assigned to it
     live_ins: list[dict[VRegister, tuple[Register,...]]] = [] # mapping from virtual to real at loop entry
+    phi_use: dict[VRegister, int] = {}
 
     # allocate the best register. Registers not in live or not used again are free and have priority,
     # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
@@ -47,7 +48,11 @@ class LinearScanRegallocContext:
 
       block = max(cons, key=lambda b: min(next_use(live_inv[r], i) if r in live_inv else len(uops) for r in b))
       for r in block:
-        if r in live_inv and (v := live_inv.get(r)) in live: live.pop(v)
+        if r in live_inv and (v := live_inv.get(r)) in live:
+          live.pop(v)
+          # phi evictions must be handled carefully to ensure loop carried
+          # use gets reloaded and not silently clobbered
+          if v.phi is not None and i < lr[v][-1]: fill(v, phi_use[v], (r,))
       return block
 
     # assign register to spilled virtual and record load to be emitted before current uop, also assign it a stack slot
@@ -71,6 +76,7 @@ class LinearScanRegallocContext:
         if u.op is Ops.END: continue
         if not isinstance(v:=rdef(s), VRegister): continue
         vv = v.parent if v.is_sub() else v
+        if vv.phi is not None: phi_use[vv] = i
         # fill at sub-register level, contiguous constraint only needed for the parent register
         if vv not in live: live[vv] = fill(vv,i,pos=v.pos)
         self.reals.setdefault(i, {})[v] = (live[vv][v.pos],) if v.is_sub() else live[vv]
@@ -93,7 +99,7 @@ class LinearScanRegallocContext:
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
-        used_in_loop = [v for v in live.keys() | self.spills.keys() if any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
+        used_in_loop = [v for v in live.keys() | self.spills.keys() if v.phi is None and any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
         sorted_uses = sorted(used_in_loop, key=lambda k: (next(l-i for l in lr[k] if l >= i), lr[k][0], k.name, k.cons[0].index))
         live_in: dict[VRegister, tuple[Register,...]] = {}
         for v in sorted_uses:
