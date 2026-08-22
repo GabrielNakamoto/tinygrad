@@ -110,7 +110,7 @@ def gethalf(x:UOp, buf:UOp, idx:UOp):
   if rafter(buf).op is Ops.BUFFER: return None
   b32 = buf.index(const(idx.val // 2, dtypes.int32), dtype=dtypes.uint32)
   if idx.val % 2 != 0: return (b32 >> 16).bitcast(x.dtype)
-  else: return x.ins(RDNA3Ops.v_mov_b16_e32, src=(b32,))
+  else: return x.ins(RDNA3Ops.v_mov_b16_e64, src=(b32,))
 
 # ---- operand legalization wrappers ----
 def _vop3(x:UOp):
@@ -435,7 +435,7 @@ isel_matcher = pm_alu_fusion + PatternMatcher([
   (UPat(Ops.WMMA, name="wmma"), render_wmma),
   # NOTE: dont realize weak casts
   (UPat.var("y", dtype=dtypes.ints+dtypes.floats).cast(name="x"),
-    lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e32"))),
+    lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e64"))),
   # --- mem ops ---
   (UPat.var("idx").store(UPat.var("val"), allow_any_len=True).named("x"), lambda ctx,x,idx,val:
     store(ctx,x,idx,val) if idx.addrspace is not AddrSpace.REG else

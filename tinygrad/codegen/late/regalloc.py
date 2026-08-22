@@ -52,7 +52,8 @@ class LinearScanRegallocContext:
           live.pop(v)
           # phi evictions must be handled carefully to ensure loop carried
           # use gets reloaded and not silently clobbered
-          if v.phi is not None and i < lr[v][-1]: fill(v, phi_use[v], (r,))
+          if v.phi is not None and v not in self.spills and v in phi_use and i <= lr[v][-1]:
+            fill(v, phi_use[v], (r,))
       return block
 
     # assign register to spilled virtual and record load to be emitted before current uop, also assign it a stack slot
