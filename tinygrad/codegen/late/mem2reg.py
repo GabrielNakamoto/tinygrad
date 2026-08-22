@@ -56,9 +56,10 @@ class Mem2regContext:
     phi = self.phis.get((ptr, self.nl[ptr]), None)
     return (phi, [phi]) if phi is not None else None
 
+# 64 bit phis/BUFFER elements?
 pm_insert_phis = PatternMatcher([
   (UPat.var("idx").load(name="x"), lambda ctx,idx,x: ctx.try_phi(idx, x)),
-  (UPat(Ops.STORE, name="x"), lambda ctx,x: (x, [x, ctx.ren.vcopy(x, ctx.phi_copies[rdef(x)])])
+  (UPat(Ops.STORE, name="x"), lambda ctx,x: (x, [x] + ctx.ren.vcopy(x, ctx.phi_copies[rdef(x)])[1])
     if rdef(x) in ctx.phi_copies else None),
 ])
 
@@ -66,8 +67,8 @@ pm_insert_phis = PatternMatcher([
 # simply rewrite LOADs to equivalent SSA node
 def update(ctx, val:UOp, x:UOp, idx:UOp):
   nx = ctx.ren.vcopy(val, rdef(x))
-  ctx.current[bptr(idx)] = nx
-  return (nx, [nx])
+  ctx.current[bptr(idx)] = nx[0]
+  return nx
 
 # only deterministic LOADs remain
 pm_promote_regbufs = PatternMatcher([

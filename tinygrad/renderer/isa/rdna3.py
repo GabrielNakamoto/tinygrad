@@ -61,6 +61,7 @@ def to_vgpr(x:UOp) -> UOp: return vmov(x) if is_const(x) else x
 def getsign(u:UOp, nbits):
   return UOp(Ops.SHR, dtypes.int32 if nbits <= 32 else dtypes.int64, src=(u, const(31 if nbits <= 32 else 63, dtypes.uint16))).bitcast(u.dtype)
 def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
+  if isinstance(r, VRegister): assert r.width == 1
   nx = x.ins(RDNA3Ops.v_mov_b16_e32 if x.dtype.itemsize == 2 and dtypes.is_float(x.dtype) else RDNA3Ops.v_mov_b32_e32, src=(x,))
   return nx.rtag() if r is None else nx.replace(tag=(r,))
 def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) else sdt
@@ -190,8 +191,9 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
 
 def lower_gated_load(ctx, x:UOp):
   alt, gate = x.src[-2:]
-  init = [ctx.ren.vcopy(s, rdef(x).sub(i)) for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.vcopy(alt, rdef(x))]
   mask = UOp(Ops.INS, arg=RDNA3Ops.s_and_saveexec_b32, src=(gate,), tag=(ctx.ren.vreg(GP_SGPRS),))
+  # TODO: make vcopy do this
+  init = [ctx.ren.vcopy(s, rdef(x).sub(i))[0] for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.vcopy(alt, rdef(x))[0]]
   x = x.replace(src=x.src[:-2])
   return x, init + [mask, x, restoreexec(mask)]
 
@@ -568,10 +570,9 @@ class RDNA3Renderer(ISARenderer):
       src=(const(spill_offset+j*16),), tag=b) for j,b in enumerate(batches)]
     return UOp.group(*ops, tag=regs), ops
 
-  def vcopy(self, u:UOp, r:VRegister) -> UOp:
-    if u.dtype.itemsize == 8:
-      return UOp.group(vmov(gep(u,0), r.sub(0)), vmov(gep(u,1), r.sub(1)), dtype=u.dtype, tag=(r,))
-    return vmov(u,r)
+  def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]:
+    movs = [vmov(gep(u,i), vr.sub(i)) for i in range(vr.width)] if vr.width > 1 else [vmov(u,vr)]
+    return (movs[0], movs) if vr.width == 1 else (UOp.group(*movs, dtype=u.dtype, tag=(vr,)), movs)
 
   def copy(self, u:UOp, regs:tuple[Register,...]) -> list[UOp]:
     return [vmov(def_reg(u.dtype, rs),rd) for rs,rd in zip(rdefs(u), regs)]

@@ -6,7 +6,7 @@ from tinygrad.renderer.isa import ISARenderer, Register, VRegister, rdefs, rdef
 from tinygrad.dtype import dtypes
 from bisect import bisect_left
 
-REG_OPS = {Ops.STORE, Ops.INS, Ops.GROUP, Ops.RANGE, Ops.END, Ops.BUFFER, Ops.PARAM, Ops.SPECIAL}
+REG_OPS = {Ops.STORE, Ops.INS, Ops.GROUP, Ops.RANGE, Ops.END, Ops.BUFFER, Ops.PARAM, Ops.SPECIAL, Ops.INDEX}
 
 class LinearScanRegallocContext:
   def vdef(self, v:VRegister) -> UOp: return self.uops[self.live_intervals[v][0]]
@@ -122,15 +122,10 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   i, nsrc, = next(ctx.idx), []
   for j,s in enumerate(x.src):
     if i in ctx.reals and (v := rdef(ctx.uops[i].src[j])) in ctx.spills:
-      # NOTE: INDEX hack..., handle this ahead of time
-      while s.op is Ops.AFTER: s=s.src[0]
-      regs = ctx.reals[i][v] if s.op is not Ops.INDEX else (ctx.reals[i][v][s.src[1].src[0].val],)
-      nsrc.append(ctx.ren.fill(ctx.spills[v], ctx.vdef(v), regs)[0])
-    elif s.op is Ops.INDEX and rdefs(s.src[0]) and (c := s.src[1].src[0].val) < len(rdefs(s.src[0])):
-      # NOTE: should these be rewritten to subregs pre-regalloc?
-      # tagless INDEX gets rewritten to indexed register block element of buf
-      nsrc.append(s.replace(tag=(rdefs(s.src[0])[c],)))
+      nsrc.append(ctx.ren.fill(ctx.spills[v], ctx.vdef(v), ctx.reals[i][v])[0])
     else:
+      if s.op is Ops.INDEX and rdef(s) is None:
+        print(rdef(x), x.dtype, s.src[0].op, s.src[0].arg, s.src[1].src[0].val)
       nsrc.append(s)
 
   ndefs, after, before = [], [], []
@@ -146,6 +141,12 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
 
   return nx, before + [nx] + after
+
+# INDEX -> subregister, lifetimes simple
+pm_index_subregisters = PatternMatcher([
+  (UPat.var("buf").index(UPat.cvar("c").cast(), name="x"), lambda buf,c,x:
+    ((nx := x.replace(tag=(v.sub(c.val),))), [nx]) if (v := rdef(buf)) and c < v.width else None),
+])
 
 pm_regalloc_rewrite = PatternMatcher([
   (UPat(REG_OPS, name="x"), regalloc_rewrite),

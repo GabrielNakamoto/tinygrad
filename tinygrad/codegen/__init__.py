@@ -25,7 +25,7 @@ from tinygrad.codegen.simplify import pm_simplify_ranges, pm_flatten_range, pm_s
 from tinygrad.schedule.multi import multi_pm
 from tinygrad.schedule.rangeify import pm_mops
 from tinygrad.codegen.late.linearizer import CFGContext, pm_split_ends, pm_add_control_flow, linearize
-from tinygrad.codegen.late.regalloc import LinearScanRegallocContext, pm_regalloc_rewrite
+from tinygrad.codegen.late.regalloc import LinearScanRegallocContext, pm_regalloc_rewrite, pm_index_subregisters
 from tinygrad.codegen.late.coalesce import memory_coalescing, pm_simplify_add_image
 from tinygrad.helpers import all_same, flatten, argsort, partition
 from tinygrad.uop.ops import _broadcast_shape, identity_element
@@ -430,6 +430,7 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     m2r = Mem2regContext(lst, ctx)
     lst = line_rewrite(lst, pm_insert_phis, m2r)
     lst = line_rewrite(lst, pm_promote_regbufs, m2r)
+    lst = line_rewrite(lst, pm_index_subregisters)
     regalloc_ctx = LinearScanRegallocContext(lst, ctx)
     lst = line_rewrite(lst, pm_regalloc_rewrite, regalloc_ctx)
     lst = ctx.stack_alloc(lst)

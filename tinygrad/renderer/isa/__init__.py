@@ -25,7 +25,7 @@ class VRegister:
   def is_sub(self) -> bool: return self.parent is not None
   def sub(self, i:int) -> VRegister:
     assert i < self.width, f"sub-register index out of width range ({i} >= {self.width})"
-    return VRegister(f"{self.name}.{i}", self.cons, self.width, self.alignment, self, i)
+    return VRegister(f"{self.name}.{i}", self.cons, 1, self.alignment, self, i)
   @functools.cached_property
   def _hash(self): return hash((self.name, len(self.cons), self.width, self.alignment, self.pos, (self.parent.name if self.parent else None)))
   def __hash__(self): return self._hash
@@ -36,8 +36,6 @@ class VRegister:
 
 def rdefs(u:UOp) -> tuple[VRegister|Register,...]:
   if u.op in {Ops.AFTER, Ops.NOOP} and len(u.src): return rdefs(u.src[0])
-  # pass through INDEXed op before regalloc unless overrided (tag on INDEX)
-  if u.op is Ops.INDEX and u.tag is None and isinstance(rdef(u.src[0]), VRegister): return rdefs(u.src[0])
   return tuple(v for v in (u.tag if isinstance(u.tag, tuple) else (u.tag,)))
 def rdef(u:UOp) -> None|tuple[VRegister|Register,...]: return rdefs(u)[0] if len(rdefs(u)) >= 1 else None
 
