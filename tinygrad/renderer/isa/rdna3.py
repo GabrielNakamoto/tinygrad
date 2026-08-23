@@ -192,10 +192,8 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
 def lower_gated_load(ctx, x:UOp):
   alt, gate = x.src[-2:]
   mask = UOp(Ops.INS, arg=RDNA3Ops.s_and_saveexec_b32, src=(gate,), tag=(ctx.ren.vreg(GP_SGPRS),))
-  # TODO: make vcopy do this
-  init = [ctx.ren.vcopy(s, rdef(x).sub(i))[0] for i,s in enumerate(alt.src)] if alt.op is Ops.GROUP else [ctx.ren.vcopy(alt, rdef(x))[0]]
   x = x.replace(src=x.src[:-2])
-  return x, init + [mask, x, restoreexec(mask)]
+  return x, ctx.ren.vcopy(alt, rdef(x))[1] + [mask, x, restoreexec(mask)]
 
 def lower_gated_store(ctx, x:UOp):
   mask = UOp(Ops.INS, arg=RDNA3Ops.s_and_saveexec_b32, src=(x.src[-1],), tag=(ctx.ren.vreg(GP_SGPRS),))
@@ -571,8 +569,15 @@ class RDNA3Renderer(ISARenderer):
     return UOp.group(*ops, tag=regs), ops
 
   def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]:
-    movs = [vmov(gep(u,i), vr.sub(i)) for i in range(vr.width)] if vr.width > 1 else [vmov(u,vr)]
-    return (movs[0], movs) if vr.width == 1 else (UOp.group(*movs, dtype=u.dtype, tag=(vr,)), movs)
+    if vr.width == 1: return (mov := vmov(u,vr)), [mov]
+    # NOTE: should we need to decompose GROUP
+    movs = []
+    if u.op is Ops.GROUP: movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
+    else:
+      for i in range(vr.width): movs.extend([gep(u,i), vmov(gep(u,i), vr.sub(i))])
+    grp = UOp.group(*movs, dtype=u.dtype, tag=(vr,))
+    # NOTE: all the nodes inluding INDEX and GROUP have to be in the linearized graph
+    return grp, movs + [grp]
 
   def copy(self, u:UOp, regs:tuple[Register,...]) -> list[UOp]:
     return [vmov(def_reg(u.dtype, rs),rd) for rs,rd in zip(rdefs(u), regs)]

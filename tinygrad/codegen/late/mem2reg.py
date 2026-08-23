@@ -59,7 +59,7 @@ class Mem2regContext:
 # 64 bit phis/BUFFER elements?
 pm_insert_phis = PatternMatcher([
   (UPat.var("idx").load(name="x"), lambda ctx,idx,x: ctx.try_phi(idx, x)),
-  (UPat(Ops.STORE, name="x"), lambda ctx,x: (x, [x] + ctx.ren.vcopy(x, ctx.phi_copies[rdef(x)])[1])
+  (UPat(Ops.STORE, name="x"), lambda ctx,x: (x, [x] + ctx.ren.vcopy(x.src[1], ctx.phi_copies[rdef(x)])[1])
     if rdef(x) in ctx.phi_copies else None),
 ])
 

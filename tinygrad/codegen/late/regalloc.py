@@ -124,8 +124,6 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
     if i in ctx.reals and (v := rdef(ctx.uops[i].src[j])) in ctx.spills:
       nsrc.append(ctx.ren.fill(ctx.spills[v], ctx.vdef(v), ctx.reals[i][v])[0])
     else:
-      if s.op is Ops.INDEX and rdef(s) is None:
-        print(rdef(x), x.dtype, s.src[0].op, s.src[0].arg, s.src[1].src[0].val)
       nsrc.append(s)
 
   ndefs, after, before = [], [], []
@@ -144,8 +142,8 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
 
 # INDEX -> subregister, lifetimes simple
 pm_index_subregisters = PatternMatcher([
-  (UPat.var("buf").index(UPat.cvar("c").cast(), name="x"), lambda buf,c,x:
-    ((nx := x.replace(tag=(v.sub(c.val),))), [nx]) if (v := rdef(buf)) and c < v.width else None),
+  (UPat.var("buf").index(UPat.cvar("c").cast(), name="x", tag=None), lambda buf,c,x:
+    ((nx := x.replace(tag=(v.sub(c.val),))), [nx]) if (v := rdef(buf)) and c.val < v.width else None),
 ])
 
 pm_regalloc_rewrite = PatternMatcher([
