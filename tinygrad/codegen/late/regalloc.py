@@ -133,7 +133,7 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   nx = x.replace(src=tuple(nsrc), tag=tuple(ndefs))
 
   for v in rdefs(x):
-    if v in ctx.spills and x.op is not Ops.BUFFER:
+    if v in ctx.spills and not (x.op is Ops.BUFFER and v.phi is not None):
       after.extend(ctx.ren.spill(ctx.spills[v],nx))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], ctx.vdef(v),rs)[1])
