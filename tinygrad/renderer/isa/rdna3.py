@@ -10,7 +10,7 @@ from tinygrad.codegen.late.regalloc import LinearScanRegallocContext
 from tinygrad.renderer.amd.elf import assemble_linear
 import tinygrad.renderer.amd.dsl as dsl
 import tinygrad.runtime.autogen.amd.rdna3.ins as RDNA3Ops
-import itertools, functools
+import itertools, functools, struct
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -56,15 +56,18 @@ S_CMP = { Ops.CMPNE:RDNA3Ops.s_xor_b32, Ops.XOR:RDNA3Ops.s_xor_b32, Ops.OR: RDNA
 
 # ---- helpers ----
 lane_ctr = itertools.count()
-def def_reg(dt, reg:Register|tuple[Register,...]): return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
+def def_reg(dt, reg:Register|tuple[Register,...]):
+  return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
 def const(v, dt:DType=dtypes.uint32) -> UOp: return UOp.cconst((v if isinstance(v, InvalidType) else truncate[dt](v)), dt).rtag()
 def gep(u:UOp, i:int) -> UOp: return u.bitcast(dtypes.uint32).index(UOp.cconst(i, dtypes.uint32))
 def const_val(x:UOp):
-  if x.op is Ops.INDEX and not dtypes.is_float(x.src[0]): return (const_val(x.src[0]) >> (32*const_val(x.src[1]))) & 0xffffffff
-  return const_val(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.val
-def is_const(x:UOp):
-  # if x.op is Ops.INDEX and x.tag is None: return all(is_const(s) for s in x.src)
-  return is_const(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.op is Ops.CONST
+  strong = x.dtype
+  while x.op is not Ops.CONST: x = x.src[0]
+  # if x.op is Ops.INDEX: return (const_val(x.src[0]) >> (32*const_val(x.src[1]))) & 0xffffffff
+  # if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER}: return const_val(x.src[0])
+  if isinstance(x.val, ConstFloat) and strong is dtypes.half: return struct.unpack('H', struct.pack('e', x.val))[0]
+  return x.val
+def is_const(x:UOp): return is_const(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.op is Ops.CONST
 def to_vgpr(x:UOp) -> UOp:
   if x.op is Ops.STACK and all(is_const(s) for s in x.src):
     return x.replace(src=tuple(vmov(s) for s in x.src))
@@ -72,14 +75,13 @@ def to_vgpr(x:UOp) -> UOp:
 def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) else sdt
 def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
   if isinstance(r, VRegister): assert r.width == 1
-  nx = x.ins(RDNA3Ops.v_mov_b16_e64 if x.dtype.itemsize == 2 and dtypes.is_float(x.dtype) else RDNA3Ops.v_mov_b32_e32, src=(x,))
+  nx = x.ins(RDNA3Ops.v_mov_b16_e64 if x.dtype is dtypes.half else RDNA3Ops.v_mov_b32_e32, src=(x,))
   # nx = x.ins(RDNA3Ops.v_mov_b32_e32, src=(x,))
   return nx.rtag() if r is None else nx.replace(tag=(r,))
 def restoreexec(mask:UOp) -> UOp: return UOp(Ops.INS, src=(execop,mask), arg=(RDNA3Ops.s_or_b32, dtypes.void), tag=(EXEC,))
 def label(ctx, name:str) -> UOp: return UOp(Ops.INS, arg=(RDNA3Ops.s_nop, dtypes.void), tag=name)
 def rafter(x:UOp, bitcast=False) -> UOp:
-  while x.op in ({Ops.AFTER, Ops.BITCAST} if bitcast else {Ops.AFTER}): x = x.src[0]
-  return x
+  return rafter(x.src[0]) if x.op in ({Ops.AFTER, Ops.BITCAST} if bitcast else {Ops.AFTER}) else x
 def multireg(*src, dtype: DType, vr:VRegister|None=None) -> UOp:
   # stack of 32 bit register values/value producing instructions
   # grouped by order to be assigned contiguous register slice
@@ -488,7 +490,7 @@ post_regalloc_matcher = PatternMatcher([
 def encode(x:UOp):
   def encfield(x:UOp):
     x = rafter(x)
-    if is_const(x): return const_val(x)
+    if is_const(x): return const_val(rafter(x))
     r, rs = rdef(x), rdefs(x)
     assert isinstance(r, Register), f"expect Register to encode, got {r} from {x}"
     for i,g in enumerate(rs[1:]): assert g.index == rs[i].index+1, "wide registers must be contiguous"
