@@ -58,7 +58,7 @@ S_CMP = { Ops.CMPNE:RDNA3Ops.s_xor_b32, Ops.XOR:RDNA3Ops.s_xor_b32, Ops.OR: RDNA
 lane_ctr = itertools.count()
 def def_reg(dt, reg:Register|tuple[Register,...]): return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
 def const(v, dt:DType=dtypes.uint32) -> UOp: return UOp.cconst((v if isinstance(v, InvalidType) else truncate[dt](v)), dt).rtag()
-def gep(u:UOp, i:int) -> UOp: return u.index(UOp.cconst(i, dtypes.uint32), dtype=dtypes.uint32)
+def gep(u:UOp, i:int) -> UOp: return u.bitcast(dtypes.uint32).index(UOp.cconst(i, dtypes.uint32))
 def const_val(x:UOp):
   if x.op is Ops.INDEX and not dtypes.is_float(x.src[0]): return (const_val(x.src[0]) >> (32*const_val(x.src[1]))) & 0xffffffff
   return const_val(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.val
@@ -123,7 +123,7 @@ def stack2regs(ctx, x:UOp):
 def unpack(x:UOp, buf:UOp, idx:UOp):
   if rafter(buf).op in {Ops.BUFFER, Ops.PARAM}: return None
   dens = 4 // buf.dtype.itemsize
-  v = vmov(buf.index(const(idx.val // dens), dtype=dtypes.uint32))
+  v = vmov(gep(buf, idx.val // dens))
   opc = RDNA3Ops.v_bfe_u32 if dtypes.is_unsigned(x.dtype) else RDNA3Ops.v_bfe_i32
   v = v.ins(opc, src=(v, const(idx.val * x.dtype.itemsize*8), const(x.dtype.itemsize*8)))
   return v.bitcast(x.dtype)
@@ -304,11 +304,12 @@ def int_to_int64(y:UOp, tdt:DType):
 # https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUISelLowering.cpp#L3691
 def f64_to_i64(y:UOp, tdt:DType):
   hi_dt = dtypes.uint32 if dtypes.is_unsigned(tdt) else dtypes.int32
-  tr = UOp(Ops.TRUNC, dtypes.float64, src=(y,))
+  tr = UOp(Ops.TRUNC, src=(y,))
   hi_f = tr.ins(RDNA3Ops.v_ldexp_f64, src=(tr,const(-32, dtypes.int16)))
   hi_f = UOp(Ops.INS, src=(hi_f,), arg=(RDNA3Ops.v_floor_f64_e32, dtypes.float64))
   lo_f = hi_f.ins(RDNA3Ops.v_ldexp_f64, src=(hi_f, const(32, dtypes.int16))) # tr - hi_f * 2 ^ 32
-  lo_f = UOp(Ops.ADD, dtypes.float64, src=(tr, UOp(Ops.MUL, dtypes.float64, src=(lo_f, const(-1., dtypes.float64)))))
+  lo_f = tr + lo_f * const(-1., dtypes.float64)
+  # lo_f = UOp(Ops.ADD, dtypes.float64, src=(tr, UOp(Ops.MUL, dtypes.float64, src=(lo_f, const(-1., dtypes.float64)))))
   return multireg(lo_f.cast(dtypes.uint32), hi_f.cast(hi_dt), dtype=tdt)
 
 # NOTE: currently only 53 bit precision (f64 mantissa), how does LLVM do it?
@@ -608,7 +609,7 @@ class RDNA3Renderer(ISARenderer):
     if u.op is Ops.STACK: movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
     else:
       for i in range(vr.width): movs.extend([gep(u,i), vmov(gep(u,i), vr.sub(i))])
-    grp = UOp.group(*movs, dtype=u.dtype, tag=(vr,))
+    grp = UOp.group(*movs, tag=(vr,))
     # NOTE: all the nodes inluding INDEX and GROUP have to be in the linearized graph
     return grp, movs + [grp]
 
