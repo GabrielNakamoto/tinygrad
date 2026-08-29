@@ -73,6 +73,7 @@ def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) e
 def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
   if isinstance(r, VRegister): assert r.width == 1
   nx = x.ins(RDNA3Ops.v_mov_b16_e64 if x.dtype.itemsize == 2 and dtypes.is_float(x.dtype) else RDNA3Ops.v_mov_b32_e32, src=(x,))
+  # nx = x.ins(RDNA3Ops.v_mov_b32_e32, src=(x,))
   return nx.rtag() if r is None else nx.replace(tag=(r,))
 def restoreexec(mask:UOp) -> UOp: return UOp(Ops.INS, src=(execop,mask), arg=(RDNA3Ops.s_or_b32, dtypes.void), tag=(EXEC,))
 def label(ctx, name:str) -> UOp: return UOp(Ops.INS, arg=(RDNA3Ops.s_nop, dtypes.void), tag=name)
@@ -129,6 +130,8 @@ def unpack(buf:UOp, idx:UOp, c:UOp):
   return UOp(Ops.INS, arg=(opc, idx.dtype), src=(gep(buf, (c.val*sz)//4), const((c.val%(4//sz))*sz*8), const(sz*8)))
 
 # ---- operand legalization wrappers ----
+# TODO: run these at pre regalloc time or something?, just automatically check for group of Ops.INS opcode to validate
+# shouldnt be manual
 def _vop3(x:UOp):
   lits = [s for s in x.src if is_const(s)]
   return x.replace(src=tuple([vmov(s) if s in lits[1:] else s for s in x.src]))
@@ -340,11 +343,12 @@ def lower_end(ctx, x:UOp):
     return inc, [inc, pred, jmp, loop_end, restoreexec(mask)]
 
 # ---- lowering passes ----
+int1regs = dtypes.int8s + dtypes.int16s + dtypes.int32s
 extra_matcher = PatternMatcher([
   # NOTE: runs before casted const
   (UPat.cvar("c", dtypes.bfloat16), lambda c: UOp.const(c.val if isinstance(c.val, InvalidType) else
     to_storage_scalar(c.val, dtypes.bfloat16), dtypes.uint16).bitcast(dtypes.bfloat16)),
-# NOTE: DISABLE_FAST_IDIV=1 by default, copy patterns here
+  # NOTE: DISABLE_FAST_IDIV=1 by default, copy patterns here
   (UPat(Ops.CDIV, src=(UPat.var("x", dtypes.ints), UPat.cvar("d"))),
     lambda ctx,x,d: fast_idiv(ctx, x, d.val) if x.vmin >= 0 or x.dtype in dtypes.uints else None),
   (UPat(Ops.CMOD, src=(UPat.var("a"), UPat.var("b"))), lambda a,b: a - b * a.alu(Ops.CDIV, b)),
@@ -354,25 +358,29 @@ extra_matcher = PatternMatcher([
 ]) + pm_manual_bf16_cast + create_non_native_float_pats((dtypes.bfloat16,)) + tc.pm_validate_wmma_rdna3
 
 pm_float_to_int = PatternMatcher([
-  (UPat.var("y", dtypes.half).cast((dtypes.double,)+dtypes.int32s+dtypes.int64s, name="x"), lambda y,x: y.cast(dtypes.float32).cast(x.dtype)),
-  (UPat.var("y", dtypes.half).cast(dtypes.int8s, name="x"), lambda y,x: y.cast(smux(x.dtype, dtypes.int32, dtypes.uint32)).bitcast(x.dtype)),
-  (UPat.var("y", dtypes.float32).cast(dtypes.int16s+dtypes.int8s, name="x"), lambda y,x: y.cast(smux(x.dtype, dtypes.int32, dtypes.uint32))),
-  (UPat.var("y", dtypes.float32).cast(dtypes.int64s, name="x"), lambda y,x: y.cast(smux(x.dtype, dtypes.int32, dtypes.uint32)).cast(x.dtype)),
-  (UPat.var("y", dtypes.double).cast(dtypes.half), lambda y: y.float().half()),
-  (UPat.var("y", dtypes.double).cast(dtypes.int16s+dtypes.int8s, name="x"), lambda y,x: y.float().cast(smux(x.dtype, dtypes.int32, dtypes.uint32))),
+  (UPat.var("y", dtypes.half).cast((dtypes.double,)+dtypes.int32s+dtypes.int64s, name="x"),
+    lambda y,x: y.float().cast(x.dtype)),
+  (UPat.var("y", (dtypes.float32, dtypes.half)).cast(dtypes.ints, name="x"),
+    lambda y,x: y.cast(smux(x.dtype, dtypes.int32, dtypes.uint32)).cast(x.dtype)),
+  (UPat.var("y", dtypes.double).cast(dtypes.int16s+dtypes.int8s, name="x"),
+    lambda y,x: y.float().cast(smux(x.dtype, dtypes.int32, dtypes.uint32)).bitcast(x.dtype)),
   (UPat.var("y", dtypes.double).cast(dtypes.int64s).named("x"), lambda y,x: f64_to_i64(y, x.dtype)),
 ])
 
 pm_int_to_float = PatternMatcher([
-  (UPat.var("y", dtypes.int32s).cast(dtypes.half), lambda y: y.float().cast(dtypes.half)),
-  (UPat.var("y", dtypes.int8s).cast(dtypes.half), lambda y: y.cast(smux(y.dtype, dtypes.int16, dtypes.uint16)).cast(dtypes.half)),
-  (UPat.var("y", dtypes.int8s+dtypes.int16s).cast((dtypes.float,dtypes.double), name="x"), lambda y,x: y.cast(smux(y.dtype, dtypes.int32, dtypes.uint32)).cast(x.dtype)),
-  (UPat.var("y", dtypes.int64s).cast((dtypes.float, dtypes.half), name="x"), lambda y,x: y.double().float().cast(x.dtype)),
+  (UPat.var("y", dtypes.int32s).cast(dtypes.half), lambda y: y.float().half()),
+  (UPat.var("y", dtypes.int8s).cast(dtypes.half),
+    lambda y: y.cast(smux(y.dtype, dtypes.int16, dtypes.uint16)).half()),
+  (UPat.var("y", dtypes.int8s+dtypes.int16s).cast((dtypes.float32,dtypes.double), name="x"),
+    lambda y,x: y.cast(smux(y.dtype, dtypes.int32, dtypes.uint32)).cast(x.dtype)),
+  (UPat.var("y", dtypes.int64s).cast((dtypes.float, dtypes.half), name="x"),
+    lambda y,x: y.double().float().cast(x.dtype)),
   (UPat.var("x", dtypes.int64s).cast(dtypes.float64), i64_to_f64),
 ])
 
-int1regs = dtypes.int8s + dtypes.int16s + dtypes.int32s
 pre_isel_matcher = PatternMatcher([
+  (UPat(Ops.MAX, dtypes.int64s, src=(UPat.var("a"), UPat.var("b"))), lambda a,b: (a < b).where(b, a)),
+  (UPat(Ops.MULACC, dtypes.ints, src=(UPat.var("a"), UPat.var("b"), UPat.var("c"))), lambda a,b,c: a*b + c),
   # --- bools are lane masks ---
   (UPat(Ops.STORE, src=(UPat.var("buf"), UPat.var("val", dtype=dtypes.bool)), allow_any_len=True, name="x"), \
     lambda buf,val,x: x.replace(src=(buf,val.cast(dtypes.uint32)) + x.src[2:])),
@@ -385,10 +393,8 @@ pre_isel_matcher = PatternMatcher([
     lambda x: x.replace(src=tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))),
   # -- int -> int casts ---
   (UPat.var("y", dtypes.int64s).cast(int1regs, name="x"), lambda y,x: gep(y, 0).bitcast(x.dtype)),
-  (UPat.var("y", dtypes.int64s).cast(dtypes.int64s).named("x"), lambda y,x: y.bitcast(x.dtype)),
-  (UPat.var("y", int1regs).cast(int1regs).named("x"), lambda y,x:
-    const((1 << y.dtype.itemsize*8)-1, x.dtype) & y.bitcast(x.dtype)
-    if y.dtype.itemsize > x.dtype.itemsize else y.bitcast(x.dtype)),
+  (UPat.var("y", int1regs).cast(dtypes.int64s, name="x"), lambda y,x: int_to_int64(y, x.dtype)),
+  (UPat.var("y", dtypes.double).cast(dtypes.half), lambda y: y.float().half()),
   # --- other ---
   # prevent 64 bit shift from being realized into 2 regs
   (UPat((Ops.SHR, Ops.SHL), src=(UPat.var("val"), UPat.var("n", dtypes.int64s+(dtypes.float64,))), name="x"),
@@ -398,13 +404,10 @@ pre_isel_matcher = PatternMatcher([
   (UPat(Ops.CDIV, dtypes.int64s, (UPat.var("a"), UPat.var("b")), name="x"), idiv64),
   (UPat(Ops.MUL, (dtypes.int16,dtypes.int32), src=(UPat.var("a"), UPat.var("b")), name="x"), lambda a,b,x:
     (a.cast(dtypes.uint32) * b.cast(dtypes.uint32)).cast(x.dtype)),
-  (UPat(Ops.MAX, dtypes.int64s, src=(UPat.var("a"), UPat.var("b"))), lambda a,b: (a < b).where(b, a)),
   (UPat(Ops.MAX, dtypes.int16s, name="x"), lambda x: x.replace(dtype=smux(x.dtype, dtypes.int32, dtypes.uint32)).bitcast(x.dtype)),
-  (UPat(Ops.MULACC, int1regs, src=(UPat.var("a"), UPat.var("b"), UPat.var("c"))), lambda a,b,c: a*b + c),
   (UPat.cvar("x").cast(dtypes.bool), lambda x: x.ins(RDNA3Ops.s_mov_b32, src=(const((1 << 32) - 1 if x.val else 0),), tag=GP_SGPRS)),
   (UPat.var("x").cast(dtypes.bool), lambda x: x.alu(Ops.CMPEQ, const(1, x.dtype))),
   (UPat.cvar("c").cast((dtypes.float64,)+dtypes.int64s, name="x"), const64),
-  (UPat.var("y", dtypes.int8s+dtypes.int16s+dtypes.int32s).cast(dtypes.int64s, name="x"), lambda y,x: int_to_int64(y, x.dtype)),
   (UPat.var("y", dtypes.bool).cast(name="x"), lambda y,x: y.where(const(1, x.dtype), const(0, x.dtype))),
 ]) + pm_float_to_int + pm_int_to_float
 
@@ -439,11 +442,13 @@ isel_matcher = PatternMatcher([
   (UPat(Ops.WHERE, dtypes.bool, src=(UPat.var("mask"), UPat.var("a"), UPat.var("b")), name="x"),
     lambda mask,a,b,x: (mask & a) | (~mask & b)),
   (UPat(Ops.WHERE, src=(UPat.var("pred"), UPat.var("a", dtype=dtypes.int64s+(dtypes.float64,)), UPat.var("b"))),
-    lambda pred,a,b: multireg(pred.where(gep(a,0),gep(b,0)), pred.where(gep(a,1), gep(b,1)), dtype=a.dtype) if a.op is not Ops.INDEX else None),
+    lambda pred,a,b: multireg(pred.where(gep(a,0),gep(b,0)), pred.where(gep(a,1), gep(b,1)), dtype=a.dtype)),
   (UPat.var("pred").where(UPat.var("a"), UPat.var("b")).named("x"), lambda pred,a,b,x:
     _vop3(x.ins(RDNA3Ops.v_cndmask_b32_e64 if x.dtype.itemsize >= 4 else RDNA3Ops.v_cndmask_b16, src=(b,a,pred)))),
   (UPat(GroupOp.Binary|GroupOp.Unary, name="x"), alu),
   (UPat(Ops.WMMA, name="wmma"), render_wmma),
+  # --- casting ---
+  (UPat.var("y", dtypes.ints).cast(dtypes.ints).named("x"), lambda y,x: y.bitcast(x.dtype)),
   # NOTE: dont realize weak casts
   (UPat.var("y", dtype=dtypes.ints+dtypes.floats).cast(name="x"),
     lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e64"))),
