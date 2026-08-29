@@ -63,8 +63,6 @@ def gep(u:UOp, i:int) -> UOp: return u.bitcast(dtypes.uint32).index(UOp.cconst(i
 def const_val(x:UOp):
   strong = x.dtype
   while x.op is not Ops.CONST: x = x.src[0]
-  # if x.op is Ops.INDEX: return (const_val(x.src[0]) >> (32*const_val(x.src[1]))) & 0xffffffff
-  # if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER}: return const_val(x.src[0])
   if isinstance(x.val, ConstFloat) and strong is dtypes.half: return struct.unpack('H', struct.pack('e', x.val))[0]
   return x.val
 def is_const(x:UOp): return is_const(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.op is Ops.CONST
@@ -389,7 +387,7 @@ pre_isel_matcher = PatternMatcher([
   (UPat(Ops.LOAD, dtypes.bool, src=(UPat.var("buf"),), name="x"),
     lambda buf,x: x.replace(src=(buf.bitcast(dtypes.uchar),)).cast(dtypes.bool)),
   # --- int8 alu is int16 for now ---
-  (UPat(GroupOp.ALU, dtypes.int8s, name="x"),
+  (UPat(GroupOp.ALU-{Ops.WHERE}, dtypes.int8s, name="x"),
     lambda x: (upcast := tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))[0].alu(x.op, *upcast[1:])),
   (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.int8s), UPat()), name="x"),
     lambda x: x.replace(src=tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))),
