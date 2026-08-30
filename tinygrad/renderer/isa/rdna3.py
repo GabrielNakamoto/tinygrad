@@ -116,7 +116,7 @@ def stack2regs(ctx, x:UOp):
         p = x.src[i*4+j].bitcast(dtypes.uint32) & const(0xFF)
         return p if j == 0 else p << const(8 * j)
       out = _pk(0)
-      for j in range(3): out = out | _pk(j+1)
+      for j in range(1, min(4, len(x.src)-i*4)): out = out | _pk(j)
       mvs.append(out)
   return multireg(*mvs, dtype=x.dtype) if len(mvs) > 1 else mvs[0].bitcast(x.dtype)
 
@@ -229,11 +229,16 @@ def arith64(ctx, x:UOp):
   return multireg(lo, hi, dtype=x.dtype).replace(tag=(vreg,))
 
 def mul64(ctx, x:UOp):
-  def _mad(a:UOp, b:UOp, c:UOp=const(0, x.dtype)): return UOp(Ops.MULACC, src=(a,b,c))
+  # Integer multiplication is identical modulo 2**64 for signed and unsigned values. Keep all partial
+  # products unsigned: v_mad_i64_i32 sign-extends each 32-bit factor and is not valid for word decomposition.
+  def _mad(a:UOp, b:UOp, c:UOp|None=None):
+    return UOp(Ops.MULACC, src=(a.bitcast(dtypes.uint32), b.bitcast(dtypes.uint32),
+                                const(0, dtypes.uint64) if c is None else c.bitcast(dtypes.uint64)))
+  def _up(x:UOp): return x.ins(RDNA3Ops.v_lshlrev_b64, src=(const(32, dtypes.int32),x))
   a, b = x.src
-  p1 = _mad(gep(a,1), gep(b,0)) >> 32
-  p2 = _mad(gep(a,0), gep(b,1)) >> 32
-  return _mad(gep(a,0), gep(b,0), p1 + p2)
+  p1 = _up(_mad(gep(a,1), gep(b,0)))
+  p2 = _up(_mad(gep(a,0), gep(b,1)))
+  return _mad(gep(a,0), gep(b,0), p1 + p2).bitcast(x.dtype)
 
 def mulhi32(a:UOp, b:UOp) -> UOp:
 	return (a.cast(dtypes.uint64) * b.cast(dtypes.uint64)) >> 32
@@ -399,7 +404,8 @@ pre_isel_matcher = PatternMatcher([
   (UPat(Ops.CDIV, dtypes.int64s, (UPat.var("a"), UPat.var("b")), name="x"), idiv64),
   (UPat(Ops.MUL, (dtypes.int16,dtypes.int32), src=(UPat.var("a"), UPat.var("b")), name="x"), lambda a,b,x:
     (a.cast(dtypes.uint32) * b.cast(dtypes.uint32)).cast(x.dtype)),
-  (UPat(Ops.MAX, dtypes.int16s, name="x"), lambda x: x.replace(dtype=smux(x.dtype, dtypes.int32, dtypes.uint32)).bitcast(x.dtype)),
+  (UPat(Ops.MAX, dtypes.int16s, name="x"), lambda x:
+    (upcast := tuple(s.cast(smux(x.dtype, dtypes.int32, dtypes.uint32)) for s in x.src))[0].alu(Ops.MAX, *upcast[1:]).bitcast(x.dtype)),
   (UPat.cvar("x").cast(dtypes.bool), lambda x: x.ins(RDNA3Ops.s_mov_b32, src=(const((1 << 32) - 1 if x.val else 0),), tag=GP_SGPRS)),
   (UPat.var("x").cast(dtypes.bool), lambda x: x.alu(Ops.CMPEQ, const(1, x.dtype))),
   (UPat.cvar("c").cast((dtypes.float64,)+dtypes.int64s, name="x"), const64),
