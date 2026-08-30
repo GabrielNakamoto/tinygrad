@@ -71,7 +71,6 @@ def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) e
 def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
   if isinstance(r, VRegister): assert r.width == 1
   nx = x.ins(RDNA3Ops.v_mov_b16_e64 if x.dtype is dtypes.half else RDNA3Ops.v_mov_b32_e32, src=(x,))
-  # nx = x.ins(RDNA3Ops.v_mov_b32_e32, src=(x,))
   return nx.rtag() if r is None else nx.replace(tag=(r,))
 def restoreexec(mask:UOp) -> UOp: return UOp(Ops.INS, src=(execop,mask), arg=(RDNA3Ops.s_or_b32, dtypes.void), tag=(EXEC,))
 def label(ctx, name:str) -> UOp: return UOp(Ops.INS, arg=(RDNA3Ops.s_nop, dtypes.void), tag=name)
@@ -123,10 +122,15 @@ def unpack(buf:UOp, idx:UOp, c:UOp):
   return UOp(Ops.INS, arg=(opc, idx.dtype), src=(gep(buf, (c.val*sz)//4), const((c.val%(4//sz))*sz*8), const(sz*8)))
 
 # ---- operand legalization wrappers ----
-# TODO: run these at pre regalloc time or something?, just automatically check for group of Ops.INS opcode to validate
-# shouldnt be manual
+def can_fold_lit(c:UOp):
+  v = const_val(rafter(c))
+  # ConstFloat hashes by bits so it never hits _FLOAT_ENC, treat it as a literal
+  if isinstance(v, float): return not isinstance(v, ConstFloat) and v in dsl.SrcField._FLOAT_ENC
+  if isinstance(v, int): return 0 <= v <= 64 or -16 <= v < 0
+  return False
+
 def _vop3(x:UOp):
-  lits = [s for s in x.src if is_const(s)]
+  lits = [s for s in x.src if is_const(s) and not can_fold_lit(s)]
   return None if len(lits) == 1 else x.replace(src=tuple([vmov(s) if s in lits[1:] else s for s in x.src]))
 
 rev_op_order = { RDNA3Ops.v_lshlrev_b32_e32, RDNA3Ops.v_lshlrev_b16, RDNA3Ops.v_lshlrev_b64, RDNA3Ops.v_lshrrev_b32_e32, RDNA3Ops.v_lshrrev_b16, RDNA3Ops.v_lshrrev_b64, RDNA3Ops.v_ashrrev_i32_e32, RDNA3Ops.v_ashrrev_i64 }
@@ -141,12 +145,9 @@ def alloc_vregs(ctx, x:UOp) -> UOp|None:
   if x.dtype is dtypes.void: return None
   if isinstance(x.tag, tuple) and isinstance(x.tag[0], VRegister): return None
 
-  if isinstance(x.tag, tuple):
-    cons, width = x.tag if isinstance(x.tag[0], tuple) else (x.tag, 1)
-    vr = ctx.ren.vreg(cons, width=width)
-  else:
-    vr = ctx.ren.vreg(GP_VGPRS, width=max(x.dtype.itemsize // 4, 1) * (len(x.src) if x.op is Ops.STACK else 1))
-  return x.replace(tag=(vr,))
+  if isinstance(x.tag, tuple): cons, width = x.tag if isinstance(x.tag[0], tuple) else (x.tag, 1)
+  else: cons, width = GP_VGPRS, ((x.dtype.itemsize+3) // 4) * (len(x.src) if x.op is Ops.STACK else 1)
+  return x.replace(tag=(ctx.ren.vreg(cons, width=width),))
 
 # https://llvm.org/docs/AMDGPUUsage.html#initial-kernel-execution-state
 def abi(ctx, x:UOp) -> UOp|None:
@@ -154,7 +155,7 @@ def abi(ctx, x:UOp) -> UOp|None:
   # NOTE: carries PARAM op through meta src edge to preserve program info
   offs = const(sum(8 if u.op == Ops.PARAM else 4 for u in ctx.func_args[:ctx.func_args.index(x)]))
   if x.addrspace is AddrSpace.ALU:
-    return vmov(UOp(Ops.INS, src=(kernarg_ptr, offs, x.rtag()), arg=(RDNA3Ops.s_load_b32, x.dtype), tag=(ctx.ren.vreg(GP_SGPRS),)))
+    return vmov(UOp(Ops.INS, src=(kernarg_ptr, offs, x.rtag()), arg=(RDNA3Ops.s_load_b32, x.dtype), tag=GP_SGPRS))
   return UOp(Ops.INS, src=(kernarg_ptr, offs, x.rtag()), arg=(RDNA3Ops.s_load_b64, dtypes.ulong),
              tag=(ctx.ren.vreg(GP_SGPRS, width=2, alignment=2),))
 
@@ -214,30 +215,30 @@ def lower_gated_store(ctx, x:UOp):
   return x, [mask, x, restoreexec(mask)]
 
 # ------ ALU ------
+# NOTE: these run at isel time, after const64 has already fired, so a 64 bit const src still has to be
+# materialized into a register pair here or gep() lands on something with no register to encode
+def as_u64(u:UOp) -> UOp:
+  return const64(u.cast(dtypes.uint64), rafter(u, True)) if is_const(u) else u.cast(dtypes.uint64)
+
 def arith64(ctx, x:UOp):
   a, b = x.src
+  a, b = as_u64(a), as_u64(b)
   ins_lo = RDNA3Ops.v_add_co_u32 if x.op is Ops.ADD else RDNA3Ops.v_sub_co_u32
   ins_hi = RDNA3Ops.v_add_co_ci_u32 if x.op is Ops.ADD else RDNA3Ops.v_sub_co_ci_u32
-  hi_dt = smux(x.dtype, dtypes.int32, dtypes.uint32)
-  vreg = ctx.ren.vreg(GP_VGPRS, width=2)
-  lo = UOp(Ops.INS, src=(gep(a,0), gep(b,0)), arg=(ins_lo, dtypes.uint32), tag=(vreg[0],))
-  hi = UOp(Ops.INS, src=(gep(a, 1), gep(b,1), vccop, lo), arg=(ins_hi, hi_dt), tag=(vreg[1],)).after(lo)
-  return multireg(lo, hi, dtype=x.dtype).replace(tag=(vreg,))
+  lo = UOp(Ops.INS, src=(gep(a,0), gep(b,0)), arg=(ins_lo, dtypes.uint32))
+  hi = UOp(Ops.INS, src=(gep(a,1), gep(b,1), vccop, lo), arg=(ins_hi, dtypes.uint32))
+  hi = hi.after(lo)
+  return multireg(lo, hi, dtype=x.dtype)
 
 def mul64(ctx, x:UOp):
-  # Integer multiplication is identical modulo 2**64 for signed and unsigned values. Keep all partial
-  # products unsigned: v_mad_i64_i32 sign-extends each 32-bit factor and is not valid for word decomposition.
-  def _mad(a:UOp, b:UOp, c:UOp|None=None):
-    return UOp(Ops.MULACC, src=(a.bitcast(dtypes.uint32), b.bitcast(dtypes.uint32),
-                                const(0, dtypes.uint64) if c is None else c.bitcast(dtypes.uint64)))
-  def _up(x:UOp): return x.ins(RDNA3Ops.v_lshlrev_b64, src=(const(32, dtypes.int32),x))
+  def _mad(a:UOp, b:UOp, c:UOp=const(0, dtypes.uint64)): return UOp(Ops.MULACC, src=(a, b, c))
   a, b = x.src
-  p1 = _up(_mad(gep(a,1), gep(b,0)))
-  p2 = _up(_mad(gep(a,0), gep(b,1)))
+  a, b = as_u64(a), as_u64(b)
+  p1 = _mad(gep(a,1), gep(b,0)).bitcast(dtypes.uint64) << 32
+  p2 = _mad(gep(a,0), gep(b,1)).bitcast(dtypes.uint64) << 32
   return _mad(gep(a,0), gep(b,0), p1 + p2).bitcast(x.dtype)
 
-def mulhi32(a:UOp, b:UOp) -> UOp:
-	return (a.cast(dtypes.uint64) * b.cast(dtypes.uint64)) >> 32
+def mulhi32(a:UOp, b:UOp) -> UOp: return ((a.cast(dtypes.uint64) * b.cast(dtypes.uint64)) >> 32).cast(dtypes.uint32)
 	# return UOp(Ops.INS, dtypes.uint32, src=(a,b), arg=RDNA3Ops.v_mul_hi_u32)
 def mulhi64(a:UOp, b:UOp) -> UOp:
   def mul32(a:UOp, b:UOp) -> UOp: return multireg(a*b, mulhi32(a,b), dtype=dtypes.uint64)
@@ -247,10 +248,13 @@ def mulhi64(a:UOp, b:UOp) -> UOp:
 
 def idiv32(x:UOp, a:UOp, b:UOp) -> UOp:
   if (signed := not dtypes.is_unsigned(x.dtype)):
-    s = ((a ^ b).bitcast(dtypes.int32) >> UOp.const(31, dtypes.int32)).bitcast(dtypes.uint32)
+    # sign extend to 32 bits first, abs() of a narrower type overflows at its min (e.g. abs(int16 -32768))
+    a, b = a.cast(dtypes.int32), b.cast(dtypes.int32)
+    s = ((a ^ b) >> UOp.const(31, dtypes.int32)).bitcast(dtypes.uint32)
     a, b = a.abs(), b.abs()
   a, b = a.cast(dtypes.uint32), b.cast(dtypes.uint32)
   z = (b.float().reciprocal() * UOp.const(2**32 - 256, dtypes.float32)).cast(dtypes.uint32)
+  # NOTE: bitcast to int32 so mulhi32 sign-extends: the Newton correction 2**32 - b*z is signed
   z = z + mulhi32(z, (b*z).bitcast(dtypes.int32).neg())
   q = mulhi32(a, z)
   r = a - q*b
@@ -262,8 +266,7 @@ def idiv32(x:UOp, a:UOp, b:UOp) -> UOp:
 def idiv64(x:UOp, a:UOp, b:UOp) -> UOp:
   if (signed := not dtypes.is_unsigned(x.dtype)):
     sa, sb = (a.bitcast(dtypes.int64) >> 63).bitcast(dtypes.uint64), (b.bitcast(dtypes.int64) >> 63).bitcast(dtypes.uint64)
-    a, b, s = (a.bitcast(dtypes.uint64)^sa)-sa, (b.bitcast(dtypes.uint64)^sb)-sb, sa^sb
-  else: a, b = a.bitcast(dtypes.uint64), b.bitcast(dtypes.uint64)
+    a, b, s = (a.cast(dtypes.uint64)^sa)-sa, (b.cast(dtypes.uint64)^sb)-sb, sa^sb
   lo, hi = b.cast(dtypes.uint32), (b >> 32).cast(dtypes.uint32)
   m = (hi.float()*UOp.const(2**32, dtypes.float32)+lo.float()).reciprocal() * UOp.const(2**64-2**42, dtypes.float32)
   t = (m * UOp.const(2**-32, dtypes.float32)).alu(Ops.TRUNC)
@@ -371,8 +374,6 @@ pm_int_to_float = PatternMatcher([
 ])
 
 pre_isel_matcher = PatternMatcher([
-  (UPat(Ops.MAX, dtypes.int64s, src=(UPat.var("a"), UPat.var("b"))), lambda a,b: (a < b).where(b, a)),
-  (UPat(Ops.MULACC, dtypes.ints, src=(UPat.var("a"), UPat.var("b"), UPat.var("c"))), lambda a,b,c: a*b + c),
   # --- bools are lane masks ---
   (UPat(Ops.STORE, src=(UPat.var("buf"), UPat.var("val", dtype=dtypes.bool)), allow_any_len=True, name="x"), \
     lambda buf,val,x: x.replace(src=(buf,val.cast(dtypes.uint32)) + x.src[2:])),
@@ -403,8 +404,10 @@ pre_isel_matcher = PatternMatcher([
   (UPat.var("x").cast(dtypes.bool), lambda x: x.alu(Ops.CMPEQ, const(1, x.dtype))),
   (UPat.cvar("c").cast((dtypes.float64,)+dtypes.int64s, name="x"), const64),
   (UPat.var("y", dtypes.bool).cast(name="x"), lambda y,x: y.where(const(1, x.dtype), const(0, x.dtype))),
-  (UPat(Ops.STACK, name="x"), lambda x: x.replace(src=tuple(vmov(s) if is_const(s) else s for s in x.src))
+  (UPat(Ops.STACK, name="x"), lambda x: x.replace(src=tuple(vmov(s) if is_const(s) and s.dtype.itemsize < 8 else s for s in x.src))
     if any(is_const(s) for s in x.src) else None),
+  (UPat(Ops.MAX, dtypes.int64s, src=(UPat.var("a"), UPat.var("b"))), lambda a,b: (a < b).where(b, a)),
+  (UPat(Ops.MULACC, dtypes.ints, src=(UPat.var("a"), UPat.var("b"), UPat.var("c"))), lambda a,b,c: a*b + c),
 ]) + pm_float_to_int + pm_int_to_float
 
 isel_matcher = PatternMatcher([
@@ -601,12 +604,15 @@ class RDNA3Renderer(ISARenderer):
 
   def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]:
     if vr.width == 1: return (mov := vmov(u,vr)), [mov]
-    movs = []
-    if u.op is Ops.STACK: movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
+    # NOTE: the STACK gets one src per subregister, the geps are only emitted as operands
+    movs, ins = [], []
+    if u.op is Ops.STACK: ins = movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
     else:
-      for i in range(vr.width): movs.extend([gep(u,i), vmov(gep(u,i), vr.sub(i))])
+      for i in range(vr.width):
+        ins.extend([g := gep(u,i), mov := vmov(g, vr.sub(i))])
+        movs.append(mov)
     grp = UOp(Ops.STACK, src=tuple(movs), tag=(vr,))
-    return grp, movs + [grp]
+    return grp, ins + [grp]
 
   def copy(self, u:UOp, regs:tuple[Register,...]) -> list[UOp]:
     return [vmov(def_reg(u.dtype, rs),rd) for rs,rd in zip(rdefs(u), regs)]

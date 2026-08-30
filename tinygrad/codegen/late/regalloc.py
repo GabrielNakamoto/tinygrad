@@ -145,7 +145,11 @@ pm_index_subregisters = PatternMatcher([
 ])
 
 def propogate_subs(ctx, x:UOp):
-  vr, n, nsrc = rdef(x), max(x.dtype.itemsize//4, 1), []
+  # NOTE: take the per src width from the register block, not x.dtype. replacing the srcs below changes the
+  # STACK's own inferred dtype (its src[0] becomes a 32 bit mov), so this rewrite has to stay idempotent
+  vr, nsrc = rdef(x), []
+  n = vr.width//len(x.src) if isinstance(vr, VRegister) and len(x.src) and vr.width%len(x.src) == 0 \
+      else max(x.dtype.itemsize//4, 1)
   for i,s in enumerate(x.src):
     def _strip(x:UOp):
       while x.op in {Ops.BITCAST, Ops.AFTER}: x = x.src[0]

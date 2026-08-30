@@ -28,7 +28,7 @@ class VRegister:
   parent: VRegister|None = None
   pos: int|None = None
   phi: tuple[VRegister,...]|None = None
-  def __repr__(self): return f"{self.name} <= phi[{','.join(str(e) for e in self.phi)}]" if self.phi is not None else self.name
+  def __repr__(self): return f"{self.name} <= phi[{','.join(str(e) for e in self.phi)}]" if self.phi is not None else f"{self.name}({self.width})"
   def is_sub(self) -> bool: return self.parent is not None
   def or_parent(self) -> VRegister: return self.parent if self.is_sub() else self
   def sub(self, i:int, length:int=1) -> VRegister:
