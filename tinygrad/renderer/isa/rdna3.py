@@ -384,8 +384,9 @@ pre_isel_matcher = PatternMatcher([
   # --- bools are lane masks ---
   (UPat(Ops.STORE, src=(UPat.var("buf"), UPat.var("val", dtype=dtypes.bool)), allow_any_len=True, name="x"), \
     lambda buf,val,x: x.replace(src=(buf,val.cast(dtypes.uint32)) + x.src[2:])),
-  (UPat(Ops.LOAD, dtypes.bool, src=(UPat.var("buf"),), name="x"),
-    lambda buf,x: x.replace(src=(buf.bitcast(dtypes.uchar),)).cast(dtypes.bool)),
+  (UPat(Ops.LOAD, dtypes.bool, src=(UPat.var("buf"),), allow_any_len=True, name="x"),
+    lambda buf,x: x.replace(src=(buf.bitcast(dtypes.uchar),) +
+      (() if len(x.src) == 1 else (x.src[1].cast(dtypes.uchar), x.src[2]))).cast(dtypes.bool)),
   # --- int8 alu is int16 for now ---
   (UPat(GroupOp.ALU-{Ops.WHERE}, dtypes.int8s, name="x"),
     lambda x: (upcast := tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))[0].alu(x.op, *upcast[1:]).bitcast(x.dtype)),
