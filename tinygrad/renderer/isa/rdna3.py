@@ -84,9 +84,6 @@ def multireg(*src, dtype: DType, vr:VRegister|None=None) -> UOp:
   # stack of 32 bit register values/value producing instructions
   # grouped by order to be assigned contiguous register slice
   return UOp(Ops.STACK, src=tuple(s.bitcast(dtypes.uint32) for s in src), tag=(vr,) if vr else None).bitcast(dtype)
-def signmask(x:UOp) -> UOp:
-  if x.dtype.itemsize < 4: x = x << (32 - x.dtype.itemsize*8)
-  return x >> (max(x.dtype.itemsize*8, 32) - 1)
 
 # ---- register classes/ABI regs ---
 VGPRS = tuple(Register(f"v{i}", i, size=4) for i in range(256))
@@ -106,7 +103,7 @@ kernarg_ptr = def_reg(dtypes.uint64, KERNARG_PTR)
 def packb16(lo:UOp, hi:UOp):
   if dtypes.is_float(lo.dtype): return lo.ins(RDNA3Ops.v_pack_b32_f16, dtype=dtypes.uint32, src=(lo,hi))
   lo, hi = lo.cast(dtypes.uint32), hi.cast(dtypes.uint32)
-  return (hi << const(16)) | (lo & const(0xFFFF))
+  return UOp(Ops.INS, arg=(RDNA3Ops.v_bfi_b32, dtypes.uint32), src=(const(0xFFFF), lo, hi << 16))
 
 def stack2regs(ctx, x:UOp):
   nregs, mvs = ((len(x.src) * x.dtype.itemsize) + 3) // 4, []
@@ -121,7 +118,6 @@ def stack2regs(ctx, x:UOp):
       out = _pk(0)
       for j in range(3): out = out | _pk(j+1)
       mvs.append(out)
-    else: mvs.append(vmov(x.src[i]))
   return multireg(*mvs, dtype=x.dtype) if len(mvs) > 1 else mvs[0].bitcast(x.dtype)
 
 def unpack(buf:UOp, idx:UOp, c:UOp):
@@ -297,23 +293,22 @@ def render_wmma(ctx, wmma:UOp):
 
 # ---- casting utilities -----
 def int_to_int64(y:UOp, tdt:DType):
-  hi = vmov(const(0)) if dtypes.is_unsigned(y.dtype) else signmask(to_vgpr(y))
+  hi = vmov(const(0)) if dtypes.is_unsigned(y.dtype) else to_vgpr(y) >> max(y.dtype.itemsize*8, 32)-1
   return multireg(vmov(y), hi, dtype=tdt)
 
-# https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPUISelLowering.cpp#L3691
 def f64_to_i64(y:UOp, tdt:DType):
   hi_dt = smux(tdt, dtypes.int32, dtypes.uint32)
   tr = y.trunc()
   hi_f = tr.ins(RDNA3Ops.v_ldexp_f64, src=(tr,const(-32)))
   hi_f = UOp(Ops.INS, src=(hi_f,), arg=(RDNA3Ops.v_floor_f64_e32, dtypes.float64))
-  lo_f = hi_f.ins(RDNA3Ops.v_ldexp_f64, src=(hi_f, const(32))) # tr - hi_f * 2 ^ 32
+  lo_f = hi_f.ins(RDNA3Ops.v_ldexp_f64, src=(hi_f, const(32)))
   lo_f = tr + lo_f * const(-1., dtypes.float64)
   return multireg(lo_f.cast(dtypes.uint32), hi_f.cast(hi_dt), dtype=tdt)
 
+# TODO: automatically fuse f64 * 2^n -> ldexp
 def i64_to_f64(x:UOp):
   lo = gep(x, 0).cast(dtypes.float64)
   hi = gep(x, 1).bitcast(smux(x.dtype, dtypes.int, dtypes.uint)).cast(dtypes.float64)
-  # TODO: automatically fuse f64 * 2^n -> ldexp
   hi = hi.ins(RDNA3Ops.v_ldexp_f64, src=(hi,const(32)))
   return lo + hi
 
@@ -388,7 +383,7 @@ pre_isel_matcher = PatternMatcher([
     lambda buf,x: x.replace(src=(buf.bitcast(dtypes.uchar),)).cast(dtypes.bool)),
   # --- int8 alu is int16 for now ---
   (UPat(GroupOp.ALU-{Ops.WHERE}, dtypes.int8s, name="x"),
-    lambda x: (upcast := tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))[0].alu(x.op, *upcast[1:])),
+    lambda x: (upcast := tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))[0].alu(x.op, *upcast[1:]).bitcast(x.dtype)),
   (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.int8s), UPat()), name="x"),
     lambda x: x.replace(src=tuple(s.cast(smux(x.dtype, dtypes.int16, dtypes.uint16)) for s in x.src))),
   # -- int -> int casts ---
@@ -448,7 +443,9 @@ isel_matcher = PatternMatcher([
   (UPat(GroupOp.Binary|GroupOp.Unary, name="x"), alu),
   (UPat(Ops.WMMA, name="wmma"), render_wmma),
   # --- casting ---
-  (UPat.var("y", dtypes.ints).cast(dtypes.ints).named("x"), lambda y,x: y.bitcast(x.dtype)),
+  (UPat.var("y", dtypes.ints).cast(dtypes.ints).named("x"), lambda y,x: y.bitcast(x.dtype)
+    if y.dtype.itemsize >= x.dtype.itemsize else
+    x.ins(RDNA3Ops.v_bfe_i32 if y.dtype in dtypes.sints else RDNA3Ops.v_bfe_u32, src=(y,const(0),const(y.dtype.itemsize*8)))),
   # NOTE: dont realize weak casts
   (UPat.var("y", dtype=dtypes.ints+dtypes.floats).cast(name="x"),
     lambda y,x: x.ins(getattr(RDNA3Ops, f"v_cvt_{dt_to_isa[x.dtype]}_{dt_to_isa[y.dtype]}_e64"))),
@@ -496,8 +493,7 @@ def encode(x:UOp):
     base = next(v for k,v in dmap.items() if k in r.name)
     return base[r.index] if len(rs) == 1 else base[r.index:r.index+len(rs)-1]
 
-  op = x.arg[0]
-  match (group := op.func):
+  match (group := x.arg[0].func):
     case RDNA3Ops.SCRATCH:
       fields = dict(offset=encfield(x.src[0]), sve=0)
       if rdef(x) is None: fields["data"] = encfield(x.src[1])
@@ -527,9 +523,9 @@ def encode(x:UOp):
       fields = dict(vdst=encfield(x), **{f"src{i}":encfield(o) for i,o in enumerate(x.src)})
     case RDNA3Ops.SOP1 | RDNA3Ops.SOP2:
       fields = dict(sdst=encfield(x), **{f"ssrc{i}":encfield(o) for i,o in enumerate(x.src)})
-    case _: raise NotImplementedError(f"instruction type encoding unsupported, ins group={group}, opcode={op.args[0].name.lower()}")
+    case _: raise NotImplementedError(f"instruction type encoding unsupported, ins group={group}, opcode={x.arg[0].args[0].name.lower()}")
 
-  return x.replace(arg=(op(**fields) if fields is not None else op(*args), x.dtype))
+  return x.replace(arg=(x.arg[0](**fields), x.dtype))
 
 class CntType(Enum):
   DS_CNT = auto(); LOAD_CNT = auto(); STORE_CNT = auto()
