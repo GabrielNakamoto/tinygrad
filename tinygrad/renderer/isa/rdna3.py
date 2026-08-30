@@ -66,10 +66,7 @@ def const_val(x:UOp):
   if isinstance(x.val, ConstFloat) and strong is dtypes.half: return struct.unpack('H', struct.pack('e', x.val))[0]
   return x.val
 def is_const(x:UOp): return is_const(x.src[0]) if x.op in {Ops.CAST, Ops.BITCAST, Ops.AFTER} else x.op is Ops.CONST
-def to_vgpr(x:UOp) -> UOp:
-  if x.op is Ops.STACK and all(is_const(s) for s in x.src):
-    return x.replace(src=tuple(vmov(s) for s in x.src))
-  return vmov(x) if is_const(x) else x
+def to_vgpr(x:UOp) -> UOp: return vmov(x) if is_const(x) else x
 def smux(dt:DType, sdt:DType, udt:DType): return udt if dtypes.is_unsigned(dt) else sdt
 def vmov(x:UOp, r:VRegister|Register|None=None) -> UOp:
   if isinstance(r, VRegister): assert r.width == 1
@@ -130,12 +127,11 @@ def unpack(buf:UOp, idx:UOp, c:UOp):
 # shouldnt be manual
 def _vop3(x:UOp):
   lits = [s for s in x.src if is_const(s)]
-  return x.replace(src=tuple([vmov(s) if s in lits[1:] else s for s in x.src]))
+  return None if len(lits) == 1 else x.replace(src=tuple([vmov(s) if s in lits[1:] else s for s in x.src]))
 
 rev_op_order = { RDNA3Ops.v_lshlrev_b32_e32, RDNA3Ops.v_lshlrev_b16, RDNA3Ops.v_lshlrev_b64, RDNA3Ops.v_lshrrev_b32_e32, RDNA3Ops.v_lshrrev_b16, RDNA3Ops.v_lshrrev_b64, RDNA3Ops.v_ashrrev_i32_e32, RDNA3Ops.v_ashrrev_i64 }
-def _vop2(ctx, x:UOp):
-  if x.arg[0] in rev_op_order: x = x.replace(src=x.src[2::-1] + x.src[2:])
-  if not is_const(x.src[1]): return x # TODO: should check positive vgpr, sgpr cant be used in vrsc1
+def _vop2(x:UOp):
+  if not is_const(x.src[1]): return None # TODO: should check positive vgpr, sgpr cant be used in vrsc1
   rest = x.src[2:] if len(x.src) > 2 else ()
   non_commutative = x.arg[0] in set(OP_INS[Ops.SUB].values()) | rev_op_order
   if not non_commutative and not is_const(x.src[0]): return x.replace(src=(x.src[1], x.src[0]) + rest)
@@ -285,10 +281,6 @@ def bitwise64(ctx, x:UOp, ins):
   hi = UOp(Ops.INS, src=(gep(a,1), gep(b,1)), arg=(ins, dtypes.uint32))
   return multireg(lo, hi, dtype=x.dtype)
 
-def alu(ctx, x:UOp):
-  ins = OP_INS[x.op][x.dtype]
-  return x.ins(ins) if len(x.src) == 1 else _vop2(ctx, x.ins(ins))
-
 def render_wmma(ctx, wmma:UOp):
   a,b,acc = wmma.src
   srcdt = dt_to_isa[wmma.arg[1]]
@@ -411,6 +403,8 @@ pre_isel_matcher = PatternMatcher([
   (UPat.var("x").cast(dtypes.bool), lambda x: x.alu(Ops.CMPEQ, const(1, x.dtype))),
   (UPat.cvar("c").cast((dtypes.float64,)+dtypes.int64s, name="x"), const64),
   (UPat.var("y", dtypes.bool).cast(name="x"), lambda y,x: y.where(const(1, x.dtype), const(0, x.dtype))),
+  (UPat(Ops.STACK, name="x"), lambda x: x.replace(src=tuple(vmov(s) if is_const(s) else s for s in x.src))
+    if any(is_const(s) for s in x.src) else None),
 ]) + pm_float_to_int + pm_int_to_float
 
 isel_matcher = PatternMatcher([
@@ -429,25 +423,26 @@ isel_matcher = PatternMatcher([
     lambda ctx,x: bitwise64(ctx, x, getattr(RDNA3Ops, f"v_{x.op.name.lower()}_b32_e32"))),
   # --- operator fusion ---
   (UPat().sqrt().named("x").reciprocal(), lambda x: x.ins(V_RSQ[x.dtype]) if x.dtype in V_RSQ else None),
-  (UPat(Ops.MULACC, dtypes.floats+dtypes.int64s, name="x"), lambda x: _vop3(x.ins(V_FMA[x.dtype]))),
+  (UPat(Ops.MULACC, dtypes.floats+dtypes.int64s, name="x"), lambda x: x.ins(V_FMA[x.dtype])),
   (UPat(Ops.ADD, dtypes.uint32, src=(UPat(Ops.ADD, name="y"), UPat.var("b")), name="x"),
-    lambda ctx,x,y,b: _vop3(x.ins(RDNA3Ops.v_add3_u32, src=y.src + (b,)))),
+    lambda ctx,x,y,b: x.ins(RDNA3Ops.v_add3_u32, src=y.src + (b,))),
   # --- general alu ---
-  (UPat(Ops.SHR, name="x"), lambda ctx,x: _vop2(ctx, x.ins(V_LSHR[max(2, x.dtype.itemsize)] \
-    if dtypes.is_unsigned(x.dtype) else V_ASHR[max(4, x.dtype.itemsize)]))),
-  (UPat(Ops.SHL, name="x"), lambda ctx,x: _vop2(ctx, x.ins(V_LSHL[max(2, x.dtype.itemsize)]))),
+  (UPat(Ops.SHR, name="x"), lambda x: x.ins(V_LSHR[max(2, x.dtype.itemsize)] \
+    if dtypes.is_unsigned(x.dtype) else V_ASHR[max(4, x.dtype.itemsize)],
+    src=x.src[2::-1])),
+  (UPat(Ops.SHL, name="x"), lambda x: x.ins(V_LSHL[max(2, x.dtype.itemsize)], src=x.src[2::-1])),
   (UPat(GroupOp.Comparison|{Ops.XOR, Ops.AND, Ops.OR}, dtypes.bool, src=(UPat.var("a", dtypes.bool), UPat.var("b")), name="x"),
     lambda a,b,x: x.ins(S_CMP[x.op], src=(b,a) if x.op is Ops.CMPLT else (a,b), tag=GP_SGPRS)),
   (UPat(GroupOp.Comparison|{Ops.XOR, Ops.AND, Ops.OR}, dtypes.bool, name="x"), lambda x:
-    _vop3(x.ins(OP_INS[x.op][64][rafter(x.src[0]).dtype], tag=GP_SGPRS))),
-  (UPat((Ops.AND, Ops.OR, Ops.XOR), name="x"), lambda ctx,x: _vop2(ctx, x.ins(getattr(RDNA3Ops, f"v_{x.op.name.lower()}_b32_e32")))),
+    x.ins(OP_INS[x.op][64][rafter(x.src[0]).dtype], tag=GP_SGPRS)),
+  (UPat((Ops.AND, Ops.OR, Ops.XOR), name="x"), lambda ctx,x: x.ins(getattr(RDNA3Ops, f"v_{x.op.name.lower()}_b32_e32"))),
   (UPat(Ops.WHERE, dtypes.bool, src=(UPat.var("mask"), UPat.var("a"), UPat.var("b")), name="x"),
     lambda mask,a,b,x: (mask & a) | (~mask & b)),
   (UPat(Ops.WHERE, src=(UPat.var("pred"), UPat.var("a", dtype=dtypes.int64s+(dtypes.float64,)), UPat.var("b"))),
     lambda pred,a,b: multireg(pred.where(gep(a,0),gep(b,0)), pred.where(gep(a,1), gep(b,1)), dtype=a.dtype)),
   (UPat.var("pred").where(UPat.var("a"), UPat.var("b")).named("x"), lambda pred,a,b,x:
-    _vop3(x.ins(RDNA3Ops.v_cndmask_b32_e64 if x.dtype.itemsize >= 4 else RDNA3Ops.v_cndmask_b16, src=(b,a,pred)))),
-  (UPat(GroupOp.Binary|GroupOp.Unary, name="x"), alu),
+    x.ins(RDNA3Ops.v_cndmask_b32_e64 if x.dtype.itemsize >= 4 else RDNA3Ops.v_cndmask_b16, src=(b,a,pred))),
+  (UPat(GroupOp.Binary|GroupOp.Unary, name="x"), lambda x: x.ins(OP_INS[x.op][x.dtype])),
   (UPat(Ops.WMMA, name="wmma"), render_wmma),
   # --- casting ---
   (UPat.var("y", dtypes.ints).cast(dtypes.ints).named("x"), lambda y,x: y.bitcast(x.dtype)
@@ -469,6 +464,8 @@ isel_matcher = PatternMatcher([
   (UPat((Ops.INS, Ops.STACK), name="x"), alloc_vregs),
   (UPat(Ops.BARRIER, name="x"), lambda x: x.ins(RDNA3Ops.s_barrier)),
   (UPat(Ops.STACK, name="x"), lambda ctx,x: stack2regs(ctx, x) if len(x.src) and x.dtype.itemsize < 4 else None),
+  (UPat(Ops.INS, name="x"), lambda x: _vop2(x) if x.arg[0].func in {RDNA3Ops.VOP2, RDNA3Ops.VOP2_LIT} else None),
+  (UPat(Ops.INS, name="x"), lambda x: _vop3(x) if x.arg[0].func in {RDNA3Ops.VOP3, RDNA3Ops.VOP3SD, RDNA3Ops.VOPC, RDNA3Ops.VOP3P} else None),
 ])
 
 # NOTE: could also match these by tag tuples (all valid load/store instructions) instead of using more ctx
@@ -531,7 +528,6 @@ def encode(x:UOp):
     case RDNA3Ops.SOP1 | RDNA3Ops.SOP2:
       fields = dict(sdst=encfield(x), **{f"ssrc{i}":encfield(o) for i,o in enumerate(x.src)})
     case _: raise NotImplementedError(f"instruction type encoding unsupported, ins group={group}, opcode={x.arg[0].args[0].name.lower()}")
-
   return x.replace(arg=(x.arg[0](**fields), x.dtype))
 
 class CntType(Enum):
@@ -596,22 +592,20 @@ class RDNA3Renderer(ISARenderer):
       batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
       ops = [UOp(Ops.INS, src=(const(spill_offset+j*16),), \
         arg=(getattr(RDNA3Ops, f"scratch_load_b{len(b)*32}"), x.dtype), tag=b) for j,b in enumerate(batches)]
-      return UOp.group(*ops, tag=regs), ops
+      return UOp(Ops.STACK, src=tuple(ops), tag=regs), ops
     else:
       vgpr,lane = spill_offset
       movs = [UOp(Ops.INS, src=(def_reg(x.dtype, vgpr),
         const(lane+i+(sub_idx or 0))), arg=(RDNA3Ops.v_readlane_b32, x.dtype), tag=(r,)) for i,r in enumerate(regs)]
-      return UOp.group(*movs, tag=regs), movs
+      return UOp(Ops.STACK, src=tuple(movs), tag=regs), movs
 
   def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]:
     if vr.width == 1: return (mov := vmov(u,vr)), [mov]
-    # NOTE: should we need to decompose GROUP
     movs = []
     if u.op is Ops.STACK: movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
     else:
       for i in range(vr.width): movs.extend([gep(u,i), vmov(gep(u,i), vr.sub(i))])
-    grp = UOp.group(*movs, tag=(vr,))
-    # NOTE: all the nodes inluding INDEX and GROUP have to be in the linearized graph
+    grp = UOp(Ops.STACK, src=tuple(movs), tag=(vr,))
     return grp, movs + [grp]
 
   def copy(self, u:UOp, regs:tuple[Register,...]) -> list[UOp]:
