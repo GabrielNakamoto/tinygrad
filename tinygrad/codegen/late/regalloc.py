@@ -150,9 +150,9 @@ def propogate_subs(ctx, x:UOp):
     def _strip(x:UOp):
       while x.op in {Ops.BITCAST, Ops.AFTER}: x = x.src[0]
       return x
-    # INDEX srcs have to become copies, can be redundant but must enforce contiguity restraint.
+    # INDEX/reg LOAD srcs have to become copies, can be redundant but must enforce contiguity restraint.
     # Optimization would have to identify equivalent STACKs and tie register blocks
-    if _strip(s).op is Ops.INDEX: nsrc.append(ctx.vcopy(s, vr[i*n:(i+1)*n-1])[0])
+    if _strip(s).op in {Ops.INDEX, Ops.LOAD}: nsrc.append(ctx.vcopy(s, vr[i*n:(i+1)*n-1])[0])
     else: nsrc.append(s.replace(tag=(vr[i*n:(i+1)*n - 1],)))
   return x.replace(src=tuple(nsrc))
 

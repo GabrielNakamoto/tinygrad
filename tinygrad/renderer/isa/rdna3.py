@@ -415,7 +415,7 @@ pre_isel_matcher = PatternMatcher([
 isel_matcher = PatternMatcher([
   # --- control flow ---
   (UPat(Ops.RANGE, name="rng"), lambda ctx,rng:
-    rng.replace(src=rng.src + (execop.ins(RDNA3Ops.s_mov_b32, dtype=dtypes.uint32, src=(execop,), tag=ctx.ren.vreg(GP_SGPRS)),),
+    rng.replace(src=rng.src + (execop.ins(RDNA3Ops.s_mov_b32, dtype=dtypes.uint32, src=(execop,), tag=GP_SGPRS),),
     tag=ctx.ren.vreg(GP_VGPRS)) if rng.tag is None else None),
   (UPat(Ops.END, src=(UPat(), UPat.var("rng"), UPat()), name="x"),
     lambda x,rng: x.replace(src=(x.src[0],rng,x.src[-1],rng.src[-1])) if rng.tag is not None else None),
