@@ -15,6 +15,11 @@ class LinearScanRegallocContext:
     self.uops, self.ren, self.idx = [u for u in uops if u.op in REG_OPS], ctx.ren, itertools.count()
     self.live_intervals: dict[VRegister, list[int]] = {}
 
+    # exclude named set (regspace BUFFERs) from normal allocation
+    # TODO: can still support some dynamic planning by popping from reserved when its lifetime is completely over
+    reserved: set[Register] = set(r for u in uops if u.op is Ops.BUFFER and isinstance((r := rdef(u)), Register))
+    print("reserved:", reserved)
+
     lr = self.live_intervals
     range_vars: list[VRegister] = []
     def live_edge(u:UOp) -> tuple[VRegister,...]: return tuple(r.parent if r.is_sub() else r for r in rdefs(u) if isinstance(r, VRegister))
@@ -40,6 +45,7 @@ class LinearScanRegallocContext:
     # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
     def alloc(v:VRegister, cons:list[tuple[Register, ...]]|None, i:int) -> tuple[Register,...]:
       cons = cons or v.candidates()
+      cons = [block for block in cons if all(r not in reserved for r in block)]
       assert len(cons), f"no candidate register blocks provided for {v}"
       live_inv = {r:k for k,v in live.items() for r in v}
 
@@ -140,26 +146,29 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
 
   return nx, before + [nx] + after
 
+pm_regalloc_rewrite = PatternMatcher([
+  (UPat(REG_OPS, name="x"), regalloc_rewrite),
+])
+
 def regspace(buf:UOp, c:UOp, x:UOp):
   stride = buf.dtype.itemsize // 4
+  if (vr := rdef(buf)) is None: return None
+  if isinstance(vr, Register) and c.val < len(buf.tag):
+    return x.replace(tag=(buf.tag[c.val],))
+
   if (vr := rdef(buf)) is None or stride*c.val >= vr.width: return None
   svr = vr[(c.val)*2:(c.val*2)+1] if x.dtype.itemsize > 4 else vr[c.val]
-  return (nx := x.replace(tag=(svr,))), [nx]
-
-# INDEX -> subregister(s), conversion to regspace coordinates
-pm_index_subregisters = PatternMatcher([
-  (UPat.var("buf").index(UPat.cvar("c").cast(), name="x", tag=None), regspace)
-])
+  return x.replace(tag=(svr,))
 
 def propogate_subs(ctx, x:UOp):
   # NOTE: take the per src width from the register block, not x.dtype. replacing the srcs below changes the
   # STACK's own inferred dtype (its src[0] becomes a 32 bit mov), so this rewrite has to stay idempotent
   vr, nsrc = rdef(x), []
-  n = vr.width//len(x.src) if isinstance(vr, VRegister) and len(x.src) and vr.width%len(x.src) == 0 \
-      else max(x.dtype.itemsize//4, 1)
+  n = vr.width//len(x.src) if isinstance(vr, VRegister) and len(x.src) and vr.width%len(x.src) == 0 else max(x.dtype.itemsize//4, 1)
   def _strip(x:UOp):
     while x.op in {Ops.BITCAST, Ops.AFTER}: x = x.src[0]
     return x
+
   for i,s in enumerate(x.src):
     # INDEX/reg LOAD srcs have to become copies, can be redundant but must enforce contiguity restraint.
     # Optimization would have to identify equivalent STACKs and tie register blocks
@@ -172,8 +181,5 @@ pm_prepare_regalloc = PatternMatcher([
   (UPat((Ops.AFTER, Ops.BITCAST), name="x"), lambda x:
     x.replace(src=(x.src[0].replace(tag=x.tag), *x.src[1:]))
     if x.tag is not None else None),
-])
-
-pm_regalloc_rewrite = PatternMatcher([
-  (UPat(REG_OPS, name="x"), regalloc_rewrite),
+  (UPat.var("buf").index(UPat.cvar("c").cast(), name="x", tag=None), regspace)
 ])

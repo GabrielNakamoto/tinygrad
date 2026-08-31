@@ -1,8 +1,9 @@
 from __future__ import annotations
+from typing import Callable
 import itertools, functools
 from dataclasses import dataclass, field
 from tinygrad.renderer import Renderer
-from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort, ProgramInfo
+from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort, ProgramInfo, AddrSpace
 
 @dataclass(frozen=True)
 class Register:
@@ -50,11 +51,29 @@ class PreLinearKernelCtx:
     self.spill_size = 0
     self.loop_label: dict[UOp, str] = {}
     self.uses = consumer_map_from_toposort(sink.toposort())
-    self.reg_n = itertools.count()
+    self.reg_n, self.named_n, self.buf_slot = itertools.count(), itertools.count(), itertools.count(-1, -1)
     def arg_key(u:UOp):
       if u.op is Ops.SPECIAL: return (2, u.arg)
       return (0, u.arg.slot) if u.arg.addrspace is not None else (1, u.expr)
     self.func_args = sorted([u for u in self.uses if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
+    self.bufregs: dict[tuple[UOp, int], UOp] = {}
+
+  def bufreg(self, idx:UOp, allocator: Callable[[UOp], tuple[Register,...]]) -> UOp:
+    if idx.op is Ops.SHRINK:
+      defs = [self.bufreg(idx.src[0].index(const(i)), allocator)[0] for i in range(idx.src[-1].src[0].val)]
+      rs = []
+      for d in defs: rs.extend(rdefs(d))
+      return UOp.group(*defs, tag=tuple(rs))
+    else:
+      while idx.op is not Ops.INDEX: idx = idx.src[0]
+      buf,idx = idx.src
+      while buf.op is not Ops.BUFFER: buf = buf.src[0]
+      r = allocator(buf)[next(self.named_n)]
+      ptr = (buf.arg, idx.src[0].val)
+      return self.bufregs.setdefault((buf.arg, idx.src[0].val), self.reserved(r, buf.dtype))
+
+  def reserved(self, regs: Register|tuple[Register,...], dt:DType) -> UOp:
+    return UOp.placeholder((1,), dt, next(self.buf_slot), AddrSpace.REG).replace(tag=regs if isinstance(regs, tuple) else (regs,))
 
   def vreg(self, cons:tuple[Register, ...], **kwargs) -> VRegister:
     return VRegister(f"vr{next(self.reg_n)}", cons if isinstance(cons, tuple) else (cons,), **kwargs)
