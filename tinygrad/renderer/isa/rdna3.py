@@ -210,7 +210,6 @@ def load(ctx, x:UOp, idx:UOp):
   suffix = "b" if sz > 2 else "i" if x.dtype in dtypes.sints else "u"
   prefix = "global" if idx.addrspace is AddrSpace.GLOBAL else "ds"
   opc = getattr(RDNA3Ops, f"{prefix}_load_{suffix}{sz*8}")
-  ctx.ren.semantic_op[opc]=Ops.LOAD
   return x.ins(opc, src=fold_address(rafter(idx, True))+x.src[1:], tag=(ctx.vreg(ctx.gp_vgprs, width=(sz+3)//4),))
 
 def store(ctx, x:UOp, idx:UOp, val:UOp):
@@ -224,7 +223,6 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
   sz = n * idx.dtype.itemsize
   prefix = "global" if idx.addrspace is AddrSpace.GLOBAL else "ds"
   opc = getattr(RDNA3Ops, f"{prefix}_store_b{sz*8}")
-  ctx.ren.semantic_op[opc]=Ops.STORE
   return x.ins(opc, src=fold_address(rafter(idx, True))+(to_vgpr(val),*x.src[2:]))
 
 def lower_gated_load(ctx, x:UOp):
@@ -487,7 +485,6 @@ isel_matcher = PatternMatcher([
   (UPat(Ops.INS, name="x"), lambda x: lvop3(x) if x.arg[0].func in {RDNA3Ops.VOP3, RDNA3Ops.VOP3SD, RDNA3Ops.VOPC, RDNA3Ops.VOP3P} else None),
 ])
 
-# NOTE: could also match these by tag tuples (all valid load/store instructions) instead of using more ctx
 pre_regalloc_matcher = PatternMatcher([
   # Lower a gated load as one adjacent sequence after linearization so the alt initialization cannot escape its CFG block.
   (UPat(Ops.INS, name="x"), lambda ctx,x: lower_gated_load(ctx,x) if ctx.ren.semantic_op.get(x.arg[0],x.op)
@@ -599,7 +596,6 @@ class RDNA3Renderer(ISARenderer):
     super().__init__(target)
     self.shared_max = HIPRenderer.shared_max
     self.tensor_cores = tc.get_amd(target.arch)
-    self.semantic_op = {}
 
   def supported_dtypes(self): return {d for d in super().supported_dtypes() if d not in dtypes.fp8s}
   def is_two_address(self, x:UOp) -> bool: return False

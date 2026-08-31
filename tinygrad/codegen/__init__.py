@@ -441,14 +441,17 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
 
   # instruction selection. NOTE: this must run on the sink we linearize, the ProgramInfo is already computed from the pre isel sink
   kctx: PreLinearKernelCtx|None = None
+  ins_schedule: dict[any, Ops]|None = None
   if isinstance(ctx, ISARenderer):
     kctx = ctx.kernel_ctx_type(sink, ctx, prg.arg)
     sink = graph_rewrite(sink, ctx.pre_isel_matcher, ctx=kctx, name="pre instruction selection", bottom_up=True)
-    sink = graph_rewrite(sink, ctx.isel_matcher, ctx=kctx, name="instruction selection", bottom_up=True)
+    sink, rewrite_ctx = graph_rewrite(sink, ctx.isel_matcher, ctx=kctx, name="instruction selection", bottom_up=True, return_ctx=True)
+    # map arbitrary Ops.INS opcodes to equivalent rewritten Ops IR to preserve metadata for scheduling etc..
+    ins_schedule: dict[any, Ops] = {mc.arg[0]:u.op for u,mc in rewrite_ctx.replace.items() if mc.op is Ops.INS}
     sink = graph_rewrite(sink, pm_prepare_regalloc, ctx=kctx, name="assign children regs")
 
   # linearize graph
-  lst = line_rewrite(linearize(sink, ctx), pm_linearize_cleanups)
+  lst = line_rewrite(linearize(sink, ins_schedule), pm_linearize_cleanups)
 
   # isa renderers need to allocate registers
   if kctx is not None:

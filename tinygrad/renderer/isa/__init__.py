@@ -101,10 +101,6 @@ class ISARenderer(Renderer):
   pre_regalloc_matcher: PatternMatcher = PatternMatcher([])
   post_regalloc_matcher: PatternMatcher
   kernel_ctx_type: type = PreLinearKernelCtx
-  # NOTE: would be nice for this to be cached automatically like in UOp.ins() or something?
-  # instead of needing to manually register important instructions in each renderer impl
-  # NOTE: this is a memo of the isa opcode -> Ops mapping, it's the same for every kernel so it can live on the renderer
-  semantic_op: dict[any, Ops] = {} # preserve IR metadata post-isel
 
   def is_two_address(self, x:UOp) -> bool: return False
   def spill_pointer(self) -> UOp: raise NotImplementedError("arch specific")
