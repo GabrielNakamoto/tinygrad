@@ -2,7 +2,7 @@ from tinygrad.dtype import dtypes, AddrSpace, truncate, DType, InvalidType, to_s
 from tinygrad.codegen.opt import tc
 from tinygrad.helpers import Target
 from tinygrad.uop.ops import Ops, UOp, UPat, PatternMatcher, ParamArg, range_str, GroupOp, graph_rewrite
-from tinygrad.renderer.isa import ISARenderer, Register, VRegister, rdefs, rdef, PreLinearKernelCtx
+from tinygrad.renderer.isa import ISARenderer, Register, VRegister, rdefs, rdef, copy_dst, PreLinearKernelCtx
 from tinygrad.renderer.cstyle import create_non_native_float_pats, pm_manual_bf16_cast
 from tinygrad.codegen.decomp.transcendental import xexp2, xlog2
 from tinygrad.codegen.decomp.op import fast_idiv
@@ -55,8 +55,9 @@ V_ASHR = { 4:RDNA3Ops.v_ashrrev_i32_e32, 8:RDNA3Ops.v_ashrrev_i64 }
 S_CMP = { Ops.CMPNE:RDNA3Ops.s_xor_b32, Ops.XOR:RDNA3Ops.s_xor_b32, Ops.OR: RDNA3Ops.s_or_b32, Ops.AND:RDNA3Ops.s_and_b32, Ops.CMPLT: RDNA3Ops.s_and_not1_b32, Ops.CMPEQ:RDNA3Ops.s_xnor_b32 }
 
 # ---- helpers ----
-# lane_ctr = itertools.count()
-# def def_reg(dt, reg:Register|tuple[Register,...]): return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
+# TODO: spill/fill still build their pinned operands here, route them through ctx.reserved when they take the kernel ctx
+lane_ctr = itertools.count(-1, -1)
+def def_reg(dt, reg:Register|tuple[Register,...]): return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
 def const(v, dt:DType=dtypes.uint32) -> UOp: return UOp.cconst((v if isinstance(v, InvalidType) else truncate[dt](v)), dt).rtag()
 def gep(u:UOp, i:int) -> UOp: return u.bitcast(dtypes.uint32).index(UOp.cconst(i, dtypes.uint32))
 def const_val(x:UOp):
@@ -139,12 +140,17 @@ def lvop2(x:UOp, swap_only=False):
   # VOP3 encodes a const in src1 fine, it only ever wants the commutative swap above, never the vmov
   return None if swap_only else x.replace(src=(x.src[0], vmov(x.src[1])) + rest)
 
+@functools.cache
+def defines_sgpr(enc) -> bool:
+  dst = next((getattr(enc, n) for n in ("vdst", "sdst", "sdata") if hasattr(enc, n)), None)
+  return isinstance(dst, (dsl.SGPRField, dsl.SSrcField, dsl.AlignedSGPRField))
+
 def alloc_vregs(ctx, x:UOp) -> UOp|None:
   if x.dtype is dtypes.void: return None
   if isinstance(x.tag, tuple) and isinstance(x.tag[0], (Register, VRegister)): return None
 
   width, alignment = 1, 1
-  is_sdst = x.op is Ops.INS and (x.arg[0].args[0].name[0] == 'S' or x.arg[0].func is RDNA3Ops.VOP3_SDST or x.arg[0] is RDNA3Ops.v_cndmask_b32_e64)
+  is_sdst = x.op is Ops.INS and defines_sgpr(x.arg[0].func)
   if isinstance(x.tag, tuple): cons = x.tag
   elif is_sdst:
     cons, width = ctx.gp_sgprs, (x.dtype.itemsize+3) // 4
@@ -210,7 +216,9 @@ def load(ctx, x:UOp, idx:UOp):
 def store(ctx, x:UOp, idx:UOp, val:UOp):
   if idx.addrspace is AddrSpace.REG:
     defs = ctx.bufreg(idx, lambda x: ctx.gp_vgprs)
-    return UOp.group(ctx.ren.copy(val, rdefs(defs)))
+    # NOTE: the copied value keeps the index chain. linearize orders by the ranges a uop's own srcs are in, so without it
+    # an acc init (which hangs off the ranges it resets in) sinks to the top of the program and only runs once
+    return ctx.ren.copy(val.after(idx), rdefs(defs))[0]
 
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.dtype.itemsize
@@ -223,7 +231,7 @@ def lower_gated_load(ctx, x:UOp):
   alt, gate = x.src[-2:]
   mask = gate.ins(RDNA3Ops.s_and_saveexec_b32, dtype=dtypes.uint32, src=(gate,), tag=(ctx.vreg(ctx.gp_sgprs),))
   x = x.replace(src=x.src[:-2])
-  return x, ctx.ren.vcopy(alt, rdef(x))[1] + [mask, x, restoreexec(ctx, mask)]
+  return x, ctx.ren.copy(alt, rdef(x))[1] + [mask, x, restoreexec(ctx, mask)]
 
 def lower_gated_store(ctx, x:UOp):
   mask = x.src[-1].ins(RDNA3Ops.s_and_saveexec_b32, dtype=dtypes.uint32, src=(x.src[-1],), tag=(ctx.vreg(ctx.gp_sgprs),))
@@ -626,23 +634,19 @@ class RDNA3Renderer(ISARenderer):
         const(lane+i+(sub_idx or 0))), arg=(RDNA3Ops.v_readlane_b32, x.dtype), tag=(r,)) for i,r in enumerate(regs)]
       return UOp(Ops.STACK, src=tuple(movs), tag=regs), movs
 
-  # TODO: unify with copy
-  def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]:
-    if vr.width == 1: return (mov := vmov(u,vr)), [mov]
-    # NOTE: the STACK gets one src per subregister, the geps are only emitted as operands
+  def copy(self, u:UOp, dst:VRegister|Register|tuple[Register,...]) -> tuple[UOp, list[UOp]]:
+    slots, tag = copy_dst(dst)
+    if len(slots) == 1: return (mov := vmov(u, slots[0])), [mov]
+    # NOTE: the STACK gets one src per slot, the geps are only emitted as operands
     movs, ins = [], []
-    if u.op is Ops.STACK: ins = movs = [vmov(s, vr.sub(i)) for i,s in enumerate(u.src)]
+    if u.op is Ops.STACK:
+      ins = movs = [vmov(s, r) for s,r in zip(u.src, slots)]
     else:
-      for i in range(vr.width):
-        ins.extend([g := gep(u,i), mov := vmov(g, vr.sub(i))])
+      for i,r in enumerate(slots):
+        ins.extend([g := gep(u,i), mov := vmov(g, r)])
         movs.append(mov)
-    grp = UOp(Ops.STACK, src=tuple(movs), tag=(vr,))
+    grp = UOp(Ops.STACK, src=tuple(movs), tag=tag)
     return grp, ins + [grp]
-
-  def copy(self, u:UOp, regs:tuple[Register,...]) -> UOp:
-    if len(regs) > 1:
-      return UOp.group(*[vmov(gep(u, i), r) for i,r in enumerate(regs)], tag=regs)
-    return vmov(u, *regs)
 
   def asm(self, prg:UOp, lin:UOp) -> bytes:
     deps: set[Register] = set()

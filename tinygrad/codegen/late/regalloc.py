@@ -1,10 +1,7 @@
 import itertools
-from dataclasses import dataclass
 from tinygrad.helpers import dedup
-from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat, AddrSpace
+from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
 from tinygrad.renderer.isa import Register, VRegister, rdefs, rdef, PreLinearKernelCtx
-from tinygrad.dtype import dtypes
-from bisect import bisect_left
 
 REG_OPS = {Ops.INS, Ops.STACK, Ops.RANGE, Ops.END, Ops.BUFFER, Ops.PARAM, Ops.SPECIAL, Ops.INDEX}
 
@@ -15,10 +12,9 @@ class LinearScanRegallocContext:
     self.uops, self.ren, self.idx = [u for u in uops if u.op in REG_OPS], ctx.ren, itertools.count()
     self.live_intervals: dict[VRegister, list[int]] = {}
 
-    # exclude named set (regspace BUFFERs) from normal allocation
     # TODO: can still support some dynamic planning by popping from reserved when its lifetime is completely over
-    reserved: set[Register] = set(r for u in uops if u.op is Ops.BUFFER and isinstance((r := rdef(u)), Register))
-    print("reserved:", reserved)
+    reserved: set[Register] = {r for blk in ctx.bufblocks.values() for r in blk}
+    reserved |= {r for u in uops if u.op is Ops.BUFFER for r in rdefs(u) if isinstance(r, Register)}
 
     lr = self.live_intervals
     range_vars: list[VRegister] = []
@@ -151,35 +147,42 @@ pm_regalloc_rewrite = PatternMatcher([
 ])
 
 def regspace(buf:UOp, c:UOp, x:UOp):
-  stride = buf.dtype.itemsize // 4
-  if (vr := rdef(buf)) is None: return None
-  if isinstance(vr, Register) and c.val < len(buf.tag):
-    return x.replace(tag=(buf.tag[c.val],))
+  if not len(defs := rdefs(buf)): return None
+  if isinstance(vr := defs[0], Register):
+    if c.val >= len(defs): return None
+    nx = x.replace(tag=(defs[c.val],))
+  else:
+    if (buf.dtype.itemsize//4)*c.val >= vr.width: return None
+    nx = x.replace(tag=(vr[c.val*2:c.val*2+1] if x.dtype.itemsize > 4 else vr[c.val],))
+  return nx, [nx]
 
-  if (vr := rdef(buf)) is None or stride*c.val >= vr.width: return None
-  svr = vr[(c.val)*2:(c.val*2)+1] if x.dtype.itemsize > 4 else vr[c.val]
-  return x.replace(tag=(svr,))
+def _strip(x:UOp):
+  while x.op in {Ops.BITCAST, Ops.AFTER}: x = x.src[0]
+  return x
 
 def propogate_subs(ctx, x:UOp):
-  # NOTE: take the per src width from the register block, not x.dtype. replacing the srcs below changes the
-  # STACK's own inferred dtype (its src[0] becomes a 32 bit mov), so this rewrite has to stay idempotent
+  # a STACK over pinned defs (reg BUFFER loads) needs no virtual register, it just collects the pinned srcs
+  if len(x.src) and all(isinstance(rdef(s), Register) for s in x.src):
+    defs = tuple(r for s in x.src for r in rdefs(s))
+    if all(b.index == a.index+1 for a,b in zip(defs, defs[1:])): return x.replace(tag=defs)
+
   vr, nsrc = rdef(x), []
   n = vr.width//len(x.src) if isinstance(vr, VRegister) and len(x.src) and vr.width%len(x.src) == 0 else max(x.dtype.itemsize//4, 1)
-  def _strip(x:UOp):
-    while x.op in {Ops.BITCAST, Ops.AFTER}: x = x.src[0]
-    return x
-
   for i,s in enumerate(x.src):
-    # INDEX/reg LOAD srcs have to become copies, can be redundant but must enforce contiguity restraint.
+    # pinned defs and INDEX/reg LOAD srcs have to become copies, can be redundant but must enforce contiguity restraint.
     # Optimization would have to identify equivalent STACKs and tie register blocks
-    if _strip(s).op in {Ops.INDEX, Ops.LOAD}: nsrc.append(ctx.vcopy(s, vr[i*n:(i+1)*n-1])[0])
-    else: nsrc.append(s.replace(tag=(vr[i*n:(i+1)*n - 1],)))
+    sub = vr[i*n:(i+1)*n-1]
+    nsrc.append(ctx.ren.copy(s, sub)[0] if isinstance(rdef(s), Register) or _strip(s).op in {Ops.INDEX, Ops.LOAD}
+                else s.replace(tag=(sub,)))
   return x.replace(src=tuple(nsrc))
 
+# NOTE: this has to be a graph rewrite
 pm_prepare_regalloc = PatternMatcher([
   (UPat(Ops.STACK, name="x"), propogate_subs),
   (UPat((Ops.AFTER, Ops.BITCAST), name="x"), lambda x:
-    x.replace(src=(x.src[0].replace(tag=x.tag), *x.src[1:]))
-    if x.tag is not None else None),
+    x.replace(src=(x.src[0].replace(tag=x.tag), *x.src[1:])) if x.tag is not None else None),
+])
+
+pm_index_subregisters = PatternMatcher([
   (UPat.var("buf").index(UPat.cvar("c").cast(), name="x", tag=None), regspace)
 ])

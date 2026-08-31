@@ -24,7 +24,7 @@ from tinygrad.codegen.simplify import pm_simplify_ranges, pm_flatten_range, pm_s
 from tinygrad.schedule.multi import multi_pm
 from tinygrad.schedule.prepare import pm_mops
 from tinygrad.codegen.late.linearizer import CFGContext, pm_split_ends, pm_add_control_flow, linearize
-from tinygrad.codegen.late.regalloc import LinearScanRegallocContext, pm_regalloc_rewrite, pm_prepare_regalloc
+from tinygrad.codegen.late.regalloc import LinearScanRegallocContext, pm_regalloc_rewrite, pm_prepare_regalloc, pm_index_subregisters
 from tinygrad.codegen.late.coalesce import memory_coalescing, pm_simplify_add_image
 from tinygrad.helpers import all_same, all_int, flatten, argsort, partition
 from tinygrad.uop.ops import _broadcast_shape, identity_element
@@ -430,7 +430,7 @@ def do_regalloc(kctx:PreLinearKernelCtx, lst:list[UOp]) -> list[UOp]:
   lst = line_rewrite(lst, ren.pre_regalloc_matcher, kctx)
   # register definitions (INS without srcs) move to the top so regalloc sees their live ranges span the whole program (callee saved regs)
   lst = sorted(lst, key=lambda u: u.op is not Ops.INS or bool(u.src))
-  lst = line_rewrite(lst, pm_prepare_regalloc)
+  lst = line_rewrite(lst, pm_index_subregisters)
   lst = line_rewrite(lst, pm_regalloc_rewrite, LinearScanRegallocContext(lst, kctx))
   # the stack frame is only known after regalloc has assigned every spill slot
   lst = kctx.stack_alloc(lst)
@@ -445,6 +445,7 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     kctx = ctx.kernel_ctx_type(sink, ctx, prg.arg)
     sink = graph_rewrite(sink, ctx.pre_isel_matcher, ctx=kctx, name="pre instruction selection", bottom_up=True)
     sink = graph_rewrite(sink, ctx.isel_matcher, ctx=kctx, name="instruction selection", bottom_up=True)
+    sink = graph_rewrite(sink, pm_prepare_regalloc, ctx=kctx, name="assign children regs")
 
   # linearize graph
   lst = line_rewrite(linearize(sink, ctx), pm_linearize_cleanups)

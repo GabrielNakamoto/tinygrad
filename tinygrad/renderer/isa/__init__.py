@@ -3,7 +3,7 @@ from typing import Callable
 import itertools, functools
 from dataclasses import dataclass, field
 from tinygrad.renderer import Renderer
-from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort, ProgramInfo, AddrSpace
+from tinygrad.uop.ops import PatternMatcher, UOp, Ops, consumer_map_from_toposort, ProgramInfo, ParamArg, AddrSpace
 
 @dataclass(frozen=True)
 class Register:
@@ -39,6 +39,11 @@ class VRegister:
     return [self.cons[i:i+self.width] for i in range(len(self.cons) - self.width + 1) if self.cons[i].index % self.alignment == 0]
   def candidates(self) -> list[tuple[Register,...]]: return self._candidates
 
+# a copy destination is either a virtual register block or a fixed set of pinned registers.
+def copy_dst(dst:VRegister|Register|tuple[Register,...]) -> tuple[tuple[VRegister|Register,...], tuple]:
+  if isinstance(dst, VRegister): return (tuple(dst.sub(i) for i in range(dst.width)) if dst.width > 1 else (dst,)), (dst,)
+  return (regs := dst if isinstance(dst, tuple) else (dst,)), regs
+
 def rdefs(u:UOp) -> tuple[VRegister|Register,...]:
   if u.op in {Ops.AFTER, Ops.NOOP, Ops.BITCAST} and len(u.src): return rdefs(u.src[0])
   return tuple(v for v in (u.tag if isinstance(u.tag, tuple) else (u.tag,)) if isinstance(v, (VRegister, Register)))
@@ -51,26 +56,33 @@ class PreLinearKernelCtx:
     self.spill_size = 0
     self.loop_label: dict[UOp, str] = {}
     self.uses = consumer_map_from_toposort(sink.toposort())
-    self.reg_n, self.named_n, self.buf_slot = itertools.count(), itertools.count(), itertools.count(-1, -1)
+    self.reg_n, self.named_n, self.buf_slot = itertools.count(), 0, itertools.count(-1, -1)
     def arg_key(u:UOp):
       if u.op is Ops.SPECIAL: return (2, u.arg)
       return (0, u.arg.slot) if u.arg.addrspace is not None else (1, u.expr)
     self.func_args = sorted([u for u in self.uses if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
-    self.bufregs: dict[tuple[UOp, int], UOp] = {}
+    self.bufblocks: dict[ParamArg, tuple[Register,...]] = {}
+    self.bufregs: dict[tuple[ParamArg, int], UOp] = {}
 
-  def bufreg(self, idx:UOp, allocator: Callable[[UOp], tuple[Register,...]]) -> UOp:
-    if idx.op is Ops.SHRINK:
-      defs = [self.bufreg(idx.src[0].index(const(i)), allocator)[0] for i in range(idx.src[-1].src[0].val)]
-      rs = []
-      for d in defs: rs.extend(rdefs(d))
-      return UOp.group(*defs, tag=tuple(rs))
-    else:
-      while idx.op is not Ops.INDEX: idx = idx.src[0]
-      buf,idx = idx.src
-      while buf.op is not Ops.BUFFER: buf = buf.src[0]
-      r = allocator(buf)[next(self.named_n)]
-      ptr = (buf.arg, idx.src[0].val)
-      return self.bufregs.setdefault((buf.arg, idx.src[0].val), self.reserved(r, buf.dtype))
+  def bufreg(self, idx:UOp, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:
+    n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
+    while idx.op is not Ops.INDEX: idx = idx.src[0]
+    buf, off = idx.src
+    while buf.op is not Ops.BUFFER: buf = buf.src[0]
+    defs = [self.bufreg_elem(buf, off.src[0].val+i, allocator) for i in range(n)]
+    return defs[0] if n == 1 else UOp.group(*defs, tag=tuple(r for d in defs for r in rdefs(d)))
+
+  # a reg BUFFER reserves one contiguous block up front
+  def bufreg_elem(self, buf:UOp, i:int, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:
+    stride = max(buf.dtype.itemsize//4, 1)
+    if (block := self.bufblocks.get(buf.arg)) is None:
+      n, regs = buf.arg.size * stride, allocator(buf)
+      assert self.named_n+n < len(regs), "no remaining pinnable registers for reg BUFFER"
+      block = self.bufblocks[buf.arg] = regs[self.named_n:self.named_n+n]
+      self.named_n += n
+    if (d := self.bufregs.get((buf.arg, i))) is None:
+      d = self.bufregs[(buf.arg, i)] = self.reserved(block[i*stride] if stride == 1 else block[i*stride:(i+1)*stride], buf.dtype)
+    return d
 
   def reserved(self, regs: Register|tuple[Register,...], dt:DType) -> UOp:
     return UOp.placeholder((1,), dt, next(self.buf_slot), AddrSpace.REG).replace(tag=regs if isinstance(regs, tuple) else (regs,))
@@ -96,8 +108,8 @@ class ISARenderer(Renderer):
 
   def is_two_address(self, x:UOp) -> bool: return False
   def spill_pointer(self) -> UOp: raise NotImplementedError("arch specific")
-  def vcopy(self, u:UOp, vr:VRegister) -> tuple[UOp, list[UOp]]: raise NotImplementedError("arch specific")
-  def copy(self, x:UOp, regs:tuple[Register,...]) -> list[UOp]: raise NotImplementedError("arch specific")
+  # copy u into dst, returns the node defining dst and the instructions to emit for it (line rewrites need both, isel only the node)
+  def copy(self, u:UOp, dst:VRegister|Register|tuple[Register,...]) -> tuple[UOp, list[UOp]]: raise NotImplementedError("arch specific")
   def spill(self, spill_offset:int, x:UOp, sub_idx:int|None=None) -> list[UOp]: raise NotImplementedError("arch specific")
   def fill(self, spill_offset:int, sub_idx:int|None, x:UOp, regs:tuple[Register,...]) -> tuple[UOp, list[UOp]]: raise NotImplementedError("arch specific")
   def asm_str(self, uops:list[UOp], function_name:str) -> str: raise NotImplementedError("arch specific")
