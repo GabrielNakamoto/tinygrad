@@ -448,7 +448,9 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     sink, rewrite_ctx = graph_rewrite(sink, ctx.isel_matcher, ctx=kctx, name="instruction selection", bottom_up=True, return_ctx=True)
     # map arbitrary Ops.INS opcodes to equivalent rewritten Ops IR to preserve metadata for scheduling etc..
     ins_schedule: dict[any, Ops] = {mc.arg[0]:u.op for u,mc in rewrite_ctx.replace.items() if mc.op is Ops.INS}
+    kctx.ins_schedule = ins_schedule
     sink = graph_rewrite(sink, pm_prepare_regalloc, ctx=kctx, name="assign children regs")
+    # TODO: perform do_estimates by caching representative INS UOps and retrieving them post-linearize?
 
   # linearize graph
   lst = line_rewrite(linearize(sink, ins_schedule), pm_linearize_cleanups)

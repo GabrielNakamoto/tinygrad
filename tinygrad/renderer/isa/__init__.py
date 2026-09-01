@@ -21,8 +21,7 @@ class VRegister:
   alignment: int = 1
   parent: VRegister|None = None
   pos: int|None = None
-  phi: tuple[VRegister,...]|None = None
-  def __repr__(self): return f"{self.name} <= phi[{','.join(str(e) for e in self.phi)}]" if self.phi is not None else f"{self.name}({self.width})"
+  def __repr__(self): return f"{self.name}({self.width})"
   def is_sub(self) -> bool: return self.parent is not None
   def or_parent(self) -> VRegister: return self.parent if self.is_sub() else self
   def sub(self, i:int, length:int=1) -> VRegister:
@@ -49,11 +48,10 @@ def rdefs(u:UOp) -> tuple[VRegister|Register,...]:
   return tuple(v for v in (u.tag if isinstance(u.tag, tuple) else (u.tag,)) if isinstance(v, (VRegister, Register)))
 def rdef(u:UOp) -> VRegister|Register|None: return rdefs(u)[0] if len(rdefs(u)) >= 1 else None
 
-# all per-kernel state of the ISA pipeline (isel -> linearize -> regalloc -> post regalloc) lives here, not on the renderer
+# all per-kernel state of the ISA pipeline lives here to avoid shared device state overlap in renderer
 class PreLinearKernelCtx:
-  def __init__(self, sink:UOp, ren:ISARenderer, info:ProgramInfo):
-    self.ren = ren
-    self.spill_size = 0
+  def __init__(self, sink:UOp, ren:ISARenderer, info:ProgramInfo, max_reserved_regs:int):
+    self.ren, self.spill_size = ren, 0
     self.loop_label: dict[UOp, str] = {}
     self.uses = consumer_map_from_toposort(sink.toposort())
     self.reg_n, self.named_n, self.buf_slot = itertools.count(), 0, itertools.count(-1, -1)
@@ -61,16 +59,35 @@ class PreLinearKernelCtx:
       if u.op is Ops.SPECIAL: return (2, u.arg)
       return (0, u.arg.slot) if u.arg.addrspace is not None else (1, u.expr)
     self.func_args = sorted([u for u in self.uses if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
-    self.bufblocks: dict[ParamArg, tuple[Register,...]] = {}
-    self.bufregs: dict[tuple[ParamArg, int], UOp] = {}
 
-  def bufreg(self, idx:UOp, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:
+    # maps reg BUFFERs to either contiguous reserved register block or pre-allocated spill slots
+    self.bufblocks: dict[ParamArg, tuple[Register,...]|tuple[any,...]] = {}
+    self.bufregs: dict[tuple[ParamArg, int], UOp|any] = {}
+    # opcode -> equivalent IR Op, filled in by do_linearize after isel
+    self.ins_schedule: dict[any, Ops] = {}
+
+    rbufs: dict[int, UOp] = {(u.arg.size * (u.dtype.itemsize//4)):u for u in sink.toposort() if u.op is Ops.BUFFER and u.addrspace is AddrSpace.REG}
+    sizes = list(sorted(rbufs.keys(), reverse=True))
+    n_spill = next((i for i in range(len(sizes)) if sum(sizes[i:]) < max_reserved_regs), len(sizes))
+    self.overflows = set(rbufs[sz].arg for sz in sizes[:n_spill])
+
+  def bufreg(self, idx:UOp, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp|list[any]:
     n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
     while idx.op is not Ops.INDEX: idx = idx.src[0]
     buf, off = idx.src
     while buf.op is not Ops.BUFFER: buf = buf.src[0]
-    defs = [self.bufreg_elem(buf, off.src[0].val+i, allocator) for i in range(n)]
-    return defs[0] if n == 1 else UOp.group(*defs, tag=tuple(r for d in defs for r in rdefs(d)))
+    # cannot be modeled in reserved REGS, pre-allocate spill space
+    if buf.arg in self.overflows:
+      vr = self.vreg(allocator(buf), width=buf.dtype.itemsize//4)
+      slots = []
+      for i in range(n):
+        if (ptr := (buf.arg, off.src[0].val+i)) not in self.bufregs:
+          self.bufregs[ptr] = self.assign_spill_slot(vr, idx)
+        slots.append(self.bufregs[ptr])
+      return slots
+    else:
+      defs = [self.bufreg_elem(buf, off.src[0].val+i, allocator) for i in range(n)]
+      return defs[0] if n == 1 else UOp.group(*defs, tag=tuple(r for d in defs for r in rdefs(d)))
 
   # a reg BUFFER reserves one contiguous block up front
   def bufreg_elem(self, buf:UOp, i:int, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:
@@ -90,7 +107,7 @@ class PreLinearKernelCtx:
   def vreg(self, cons:tuple[Register, ...], **kwargs) -> VRegister:
     return VRegister(f"vr{next(self.reg_n)}", cons if isinstance(cons, tuple) else (cons,), **kwargs)
 
-  # returns arch specific placement information for the spilled virtual register, and grows the stack frame if it spills to memory
+  # returns arch specific placement information for the spilled virtual register and grows stack frame
   def assign_spill_slot(self, v:VRegister, vdef:UOp) -> any: raise NotImplementedError("arch specific")
   # runs after regalloc, when the size of the stack frame is known
   def stack_alloc(self, uops:list[UOp]) -> list[UOp]: return uops

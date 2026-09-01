@@ -55,7 +55,6 @@ V_ASHR = { 4:RDNA3Ops.v_ashrrev_i32_e32, 8:RDNA3Ops.v_ashrrev_i64 }
 S_CMP = { Ops.CMPNE:RDNA3Ops.s_xor_b32, Ops.XOR:RDNA3Ops.s_xor_b32, Ops.OR: RDNA3Ops.s_or_b32, Ops.AND:RDNA3Ops.s_and_b32, Ops.CMPLT: RDNA3Ops.s_and_not1_b32, Ops.CMPEQ:RDNA3Ops.s_xnor_b32 }
 
 # ---- helpers ----
-# TODO: spill/fill still build their pinned operands here, route them through ctx.reserved when they take the kernel ctx
 lane_ctr = itertools.count(-1, -1)
 def def_reg(dt, reg:Register|tuple[Register,...]): return UOp.placeholder((1,), dt, next(lane_ctr), AddrSpace.REG).replace(tag=(reg,) if isinstance(reg,Register) else reg)
 def const(v, dt:DType=dtypes.uint32) -> UOp: return UOp.cconst((v if isinstance(v, InvalidType) else truncate[dt](v)), dt).rtag()
@@ -140,7 +139,6 @@ def lvop2(x:UOp, swap_only=False):
   # VOP3 encodes a const in src1 fine, it only ever wants the commutative swap above, never the vmov
   return None if swap_only else x.replace(src=(x.src[0], vmov(x.src[1])) + rest)
 
-@functools.cache
 def defines_sgpr(enc) -> bool:
   dst = next((getattr(enc, n) for n in ("vdst", "sdst", "sdata") if hasattr(enc, n)), None)
   return isinstance(dst, (dsl.SGPRField, dsl.SSrcField, dsl.AlignedSGPRField))
@@ -203,7 +201,12 @@ def fold_address(x:UOp): return fold_lds(*x.src[:2]) if x.addrspace is AddrSpace
 
 def load(ctx, x:UOp, idx:UOp):
   if idx.addrspace is AddrSpace.REG:
-    return ctx.bufreg(idx, lambda x: ctx.gp_vgprs).after(idx)
+    if isinstance((defs := ctx.bufreg(idx, lambda x: ctx.gp_vgprs)), UOp):
+      return defs.after(idx)
+    else:
+      for slot in defs:
+        ctx.ren.fill(
+      return out.after(idx)
 
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.src[0].dtype.itemsize
@@ -214,10 +217,11 @@ def load(ctx, x:UOp, idx:UOp):
 
 def store(ctx, x:UOp, idx:UOp, val:UOp):
   if idx.addrspace is AddrSpace.REG:
-    defs = ctx.bufreg(idx, lambda x: ctx.gp_vgprs)
-    # NOTE: the copied value keeps the index chain. linearize orders by the ranges a uop's own srcs are in, so without it
-    # an acc init (which hangs off the ranges it resets in) sinks to the top of the program and only runs once
-    return ctx.ren.copy(val.after(idx), rdefs(defs))[0]
+    if isinstance((defs := ctx.bufreg(idx, lambda x: ctx.gp_vgprs)), UOp):
+      return ctx.ren.copy(val.after(idx), rdefs(defs))[0]
+    else: # no room to reserve regs, model as scratch
+      opc = getattr(RDNA3Ops, f"scratch_store_b{idx.dtype.itemsize*8}")
+      return UOp.group(*[UOp(Ops.INS, arg=(opc, dtypes.void), src=(const(slot), gep(val,i))) for i,slot in enumerate(defs)])
 
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.dtype.itemsize
@@ -225,12 +229,17 @@ def store(ctx, x:UOp, idx:UOp, val:UOp):
   opc = getattr(RDNA3Ops, f"{prefix}_store_b{sz*8}")
   return x.ins(opc, src=fold_address(rafter(idx, True))+(to_vgpr(val),*x.src[2:]))
 
+# TODO: cleaner way of lowering gateds
+# - what can we move upstream?
+# - how to nudge linearizer to place necessary ops in the same CFG block?
+# (how are RANGE dependencies normally modeled? AFTER, rng src edge...)
 def lower_gated_load(ctx, x:UOp):
   alt, gate = x.src[-2:]
   mask = gate.ins(RDNA3Ops.s_and_saveexec_b32, dtype=dtypes.uint32, src=(gate,), tag=(ctx.vreg(ctx.gp_sgprs),))
   x = x.replace(src=x.src[:-2])
   return x, ctx.ren.copy(alt, rdef(x))[1] + [mask, x, restoreexec(ctx, mask)]
 
+# NOTE: can this be done pre-linearize?
 def lower_gated_store(ctx, x:UOp):
   mask = x.src[-1].ins(RDNA3Ops.s_and_saveexec_b32, dtype=dtypes.uint32, src=(x.src[-1],), tag=(ctx.vreg(ctx.gp_sgprs),))
   x = x.replace(src=x.src[:-1])
@@ -485,11 +494,12 @@ isel_matcher = PatternMatcher([
   (UPat(Ops.INS, name="x"), lambda x: lvop3(x) if x.arg[0].func in {RDNA3Ops.VOP3, RDNA3Ops.VOP3SD, RDNA3Ops.VOPC, RDNA3Ops.VOP3P} else None),
 ])
 
+
 pre_regalloc_matcher = PatternMatcher([
   # Lower a gated load as one adjacent sequence after linearization so the alt initialization cannot escape its CFG block.
-  (UPat(Ops.INS, name="x"), lambda ctx,x: lower_gated_load(ctx,x) if ctx.ren.semantic_op.get(x.arg[0],x.op)
+  (UPat(Ops.INS, name="x"), lambda ctx,x: lower_gated_load(ctx,x) if ctx.ins_schedule.get(x.arg[0],x.op)
     is Ops.LOAD and x.src[-1].dtype is dtypes.bool and rafter(x.src[-1]).op is not Ops.BUFFER else None),
-  (UPat(Ops.INS, name="x"), lambda ctx,x: lower_gated_store(ctx,x) if ctx.ren.semantic_op.get(x.arg[0],x.op)
+  (UPat(Ops.INS, name="x"), lambda ctx,x: lower_gated_store(ctx,x) if ctx.ins_schedule.get(x.arg[0],x.op)
     is Ops.STORE and x.src[-1].dtype is dtypes.bool else None),
 ])
 
@@ -558,7 +568,7 @@ class CntType(Enum):
 
 class RDNA3PreLinearKernelCtx(PreLinearKernelCtx):
   def __init__(self, sink:UOp, ren:RDNA3Renderer, info:ProgramInfo):
-    super().__init__(sink, ren, info)
+    super().__init__(sink, ren, info, 200)
     # NOTE: entire kernel must fit on single CU? (WGP?)
     # 1536 vgprs per SIMD, 2 SIMD per CU
     # constrain waves*vgpr_limit <<< 1536*2, prevent dispatch hang
@@ -572,7 +582,7 @@ class RDNA3PreLinearKernelCtx(PreLinearKernelCtx):
     self.execop, self.vccop = self.reserved(EXEC, dtypes.uint32), self.reserved(VCC, dtypes.uint32)
 
   def assign_spill_slot(self, v:VRegister, vdef:UOp) -> int|tuple[Register, int]:
-    if v.cons[0].name[0] == 'v':
+    if v.cons[0] in VGPRS:
       sz = v.cons[0].size * v.width
       offset = self.spill_size + (sz - self.spill_size % sz) % sz
       self.spill_size = offset + sz
@@ -594,8 +604,7 @@ class RDNA3Renderer(ISARenderer):
   kernel_ctx_type = RDNA3PreLinearKernelCtx
   def __init__(self, target:Target):
     super().__init__(target)
-    self.shared_max = HIPRenderer.shared_max
-    self.tensor_cores = tc.get_amd(target.arch)
+    self.shared_max, self.tensor_cores = HIPRenderer.shared_max, tc.get_amd(target.arch)
 
   def supported_dtypes(self): return {d for d in super().supported_dtypes() if d not in dtypes.fp8s}
   def is_two_address(self, x:UOp) -> bool: return False
@@ -606,8 +615,7 @@ class RDNA3Renderer(ISARenderer):
     regs = rdefs(x)
     if regs[0].name[0] == 'v':
       if sub_idx is not None:
-        return [UOp(Ops.INS, arg=(RDNA3Ops.scratch_store_b32, dtypes.void),
-          src=(const(spill_offset+sub_idx*4), def_reg(x.dtype, regs)))]
+        return [UOp(Ops.INS, arg=(RDNA3Ops.scratch_store_b32, dtypes.void), src=(const(spill_offset+sub_idx*4), def_reg(x.dtype, regs)))]
       batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
       return [UOp(Ops.INS, arg=(getattr(RDNA3Ops, f"scratch_store_b{len(b)*32}"), dtypes.void), \
         src=(const(spill_offset+j*16), def_reg(x.dtype, b))) for j,b in enumerate(batches)]
@@ -616,11 +624,12 @@ class RDNA3Renderer(ISARenderer):
       return [UOp(Ops.INS, arg=(RDNA3Ops.v_writelane_b32, dtypes.void), src=(def_reg(x.dtype, r),
         const(lane+i+(sub_idx or 0))), tag=vgpr) for i,r in enumerate(regs)]
 
-  def fill(self, spill_offset:any, sub_idx:int|None, x:UOp, regs:tuple[Register,...]) -> tuple[UOp, list[UOp]]:
+  def fill(self, spill_offset:any, sub_idx:int|None, x:UOp, regs:VRegister|tuple[Register,...]) -> tuple[UOp, list[UOp]]:
     if regs[0].name[0] == 'v':
       if sub_idx is not None:
         return (ld := UOp(Ops.INS, src=(const(spill_offset+sub_idx*4),), arg=(RDNA3Ops.scratch_load_b32, x.dtype), tag=regs)), [ld]
-      batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
+      if isinstance(regs, VRegister): batches = [regs[i] for i in range(regs.width)]
+      else: batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
       ops = [UOp(Ops.INS, src=(const(spill_offset+j*16),), \
         arg=(getattr(RDNA3Ops, f"scratch_load_b{len(b)*32}"), x.dtype), tag=b) for j,b in enumerate(batches)]
       return UOp(Ops.STACK, src=tuple(ops), tag=regs), ops

@@ -13,7 +13,8 @@ class LinearScanRegallocContext:
     self.live_intervals: dict[VRegister, list[int]] = {}
 
     # TODO: can still support some dynamic planning by popping from reserved when its lifetime is completely over
-    reserved: set[Register] = {r for blk in ctx.bufblocks.values() for r in blk}
+    # NOTE: a bufblock is a reserved register block, or a UOp when the reg BUFFER was spilled to LOCAL and reserves nothing
+    reserved: set[Register] = {r for blk in ctx.bufblocks.values() if isinstance(blk, tuple) for r in blk}
     reserved |= {r for u in uops if u.op is Ops.BUFFER for r in rdefs(u) if isinstance(r, Register)}
 
     lr = self.live_intervals
@@ -51,9 +52,6 @@ class LinearScanRegallocContext:
       for r in block:
         if r in live_inv and (ev := live_inv.get(r)) in live:
           live.pop(ev)
-          # phi evictions must be handled carefully to ensure loop carry gets reloaded and not silently clobbered
-          if ev.phi is not None and ev not in self.spills and i <= lr[ev][-1]:
-            fill(ev, self.live_intervals[ev][1], (r,))
       return block
 
     # assign register to spilled virtual and record load to be emitted before current uop, also assign it a stack slot
@@ -61,8 +59,7 @@ class LinearScanRegallocContext:
       if v not in self.spills:
         self.spills[v] = ctx.assign_spill_slot(v, self.vdef(v))
       rs = alloc(v, [cons] if cons is not None else None, i)
-      if v.phi is None: # NOTE: phis insert their own fills at rewrite time
-        self.insert_before.setdefault(i, []).append((v, rs))
+      self.insert_before.setdefault(i, []).append((v, rs))
       return rs
 
     for i,u in enumerate(self.uops):
@@ -91,7 +88,7 @@ class LinearScanRegallocContext:
       # loop prologue, avoid loading inside the loop
       if u.op is Ops.RANGE:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
-        used_in_loop = [v for v in live.keys() | self.spills.keys() if v.phi is None and any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
+        used_in_loop = [v for v in live.keys() | self.spills.keys() if any(i <= l < lr[rdef(u)][-1] for l in lr[v])]
         sorted_uses = sorted(used_in_loop, key=lambda k: (next(l-i for l in lr[k] if l >= i), lr[k][0], k.name, k.cons[0].index))
         live_in: dict[VRegister, tuple[Register,...]] = {}
         for v in sorted_uses:
@@ -117,12 +114,7 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   i, nsrc, before = next(ctx.idx), [], []
   for j,s in enumerate(x.src):
     if i in ctx.reals and isinstance((v := rdef(ctx.uops[i].src[j])), VRegister) and (vv := v.or_parent()) in ctx.spills:
-      if vv.phi is not None:
-        # spilled PHIs must be filled at every use.
-        filled, fills = ctx.ren.fill(ctx.spills[vv], v.pos if v.is_sub() else None, ctx.vdef(vv), ctx.reals[i][v])
-        nsrc.append(filled)
-        before.extend(fills)
-      else: nsrc.append(retag(s, ctx.reals[i][v]))
+      nsrc.append(retag(s, ctx.reals[i][v]))
     else:
       nsrc.append(s)
 
@@ -135,7 +127,7 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   for v in rdefs(x):
     if not isinstance(v, VRegister): continue
     # only spill parents
-    if v in ctx.spills and not (x.op is Ops.BUFFER and v.phi is not None):
+    if v in ctx.spills and x.op is not Ops.BUFFER:
       after.extend(ctx.ren.spill(ctx.spills[v], nx, None))
   for v,rs in ctx.insert_before.get(i, []):
     before.extend(ctx.ren.fill(ctx.spills[v], None, ctx.vdef(v), rs)[1])
