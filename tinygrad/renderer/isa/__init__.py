@@ -71,23 +71,13 @@ class PreLinearKernelCtx:
     n_spill = next((i for i in range(len(sizes)) if sum(sizes[i:]) < max_reserved_regs), len(sizes))
     self.overflows = set(rbufs[sz].arg for sz in sizes[:n_spill])
 
-  def bufreg(self, idx:UOp, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp|list[any]:
+  def bufreg(self, idx:UOp, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:
     n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
     while idx.op is not Ops.INDEX: idx = idx.src[0]
     buf, off = idx.src
     while buf.op is not Ops.BUFFER: buf = buf.src[0]
-    # cannot be modeled in reserved REGS, pre-allocate spill space
-    if buf.arg in self.overflows:
-      vr = self.vreg(allocator(buf), width=buf.dtype.itemsize//4)
-      slots = []
-      for i in range(n):
-        if (ptr := (buf.arg, off.src[0].val+i)) not in self.bufregs:
-          self.bufregs[ptr] = self.assign_spill_slot(vr, idx)
-        slots.append(self.bufregs[ptr])
-      return slots
-    else:
-      defs = [self.bufreg_elem(buf, off.src[0].val+i, allocator) for i in range(n)]
-      return defs[0] if n == 1 else UOp.group(*defs, tag=tuple(r for d in defs for r in rdefs(d)))
+    defs = [self.bufreg_elem(buf, off.src[0].val+i, allocator) for i in range(n)]
+    return defs[0] if n == 1 else UOp.group(*defs, tag=tuple(r for d in defs for r in rdefs(d)))
 
   # a reg BUFFER reserves one contiguous block up front
   def bufreg_elem(self, buf:UOp, i:int, allocator:Callable[[UOp], tuple[Register,...]]) -> UOp:

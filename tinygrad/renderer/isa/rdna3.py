@@ -201,12 +201,7 @@ def fold_address(x:UOp): return fold_lds(*x.src[:2]) if x.addrspace is AddrSpace
 
 def load(ctx, x:UOp, idx:UOp):
   if idx.addrspace is AddrSpace.REG:
-    if isinstance((defs := ctx.bufreg(idx, lambda x: ctx.gp_vgprs)), UOp):
-      return defs.after(idx)
-    else:
-      for slot in defs:
-        ctx.ren.fill(
-      return out.after(idx)
+    return ctx.bufreg(idx, lambda x: ctx.gp_vgprs).after(idx)
 
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.src[0].dtype.itemsize
@@ -217,11 +212,8 @@ def load(ctx, x:UOp, idx:UOp):
 
 def store(ctx, x:UOp, idx:UOp, val:UOp):
   if idx.addrspace is AddrSpace.REG:
-    if isinstance((defs := ctx.bufreg(idx, lambda x: ctx.gp_vgprs)), UOp):
-      return ctx.ren.copy(val.after(idx), rdefs(defs))[0]
-    else: # no room to reserve regs, model as scratch
-      opc = getattr(RDNA3Ops, f"scratch_store_b{idx.dtype.itemsize*8}")
-      return UOp.group(*[UOp(Ops.INS, arg=(opc, dtypes.void), src=(const(slot), gep(val,i))) for i,slot in enumerate(defs)])
+    defs = ctx.bufreg(idx, lambda x: ctx.gp_vgprs)
+    return ctx.ren.copy(val.after(idx), rdefs(defs))[0]
 
   n = idx.src[-1].src[0].val if idx.op is Ops.SHRINK else 1
   sz = n * idx.dtype.itemsize
@@ -624,12 +616,11 @@ class RDNA3Renderer(ISARenderer):
       return [UOp(Ops.INS, arg=(RDNA3Ops.v_writelane_b32, dtypes.void), src=(def_reg(x.dtype, r),
         const(lane+i+(sub_idx or 0))), tag=vgpr) for i,r in enumerate(regs)]
 
-  def fill(self, spill_offset:any, sub_idx:int|None, x:UOp, regs:VRegister|tuple[Register,...]) -> tuple[UOp, list[UOp]]:
+  def fill(self, spill_offset:any, sub_idx:int|None, x:UOp, regs:tuple[Register,...]) -> tuple[UOp, list[UOp]]:
     if regs[0].name[0] == 'v':
       if sub_idx is not None:
         return (ld := UOp(Ops.INS, src=(const(spill_offset+sub_idx*4),), arg=(RDNA3Ops.scratch_load_b32, x.dtype), tag=regs)), [ld]
-      if isinstance(regs, VRegister): batches = [regs[i] for i in range(regs.width)]
-      else: batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
+      batches = [regs[i*4:(i+1)*4] for i in range((len(regs)+3)//4)]
       ops = [UOp(Ops.INS, src=(const(spill_offset+j*16),), \
         arg=(getattr(RDNA3Ops, f"scratch_load_b{len(b)*32}"), x.dtype), tag=b) for j,b in enumerate(batches)]
       return UOp(Ops.STACK, src=tuple(ops), tag=regs), ops
