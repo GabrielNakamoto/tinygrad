@@ -126,14 +126,10 @@ def dtype_from_uop(op:Ops, src:tuple[UOp,...], arg:Any) -> DType:
       # always void
       return dtypes.void
     case Ops.CALL:
-      # a call states its (possibly void) dtype in the CallInfo
-      return arg.dtype if isinstance(arg, CallInfo) else dtypes.void
+      # a call states its (possibly void) dtype in the CallInfo/InstInfo
+      return arg.dtype if isinstance(arg, (InstInfo, CallInfo)) else dtypes.void
     case Ops.CUSTOM | Ops.CUSTOMI:
       assert isinstance(arg, tuple) and len(arg) == 2 and isinstance(arg[1], DType), f"CUSTOM/CUSTOMI arg must be (str, DType), got {arg}"
-      return arg[1]
-    case Ops.INS:
-      # arg is (instruction, dtype), a queue command or an asm line is void
-      assert isinstance(arg, tuple) and len(arg) == 2 and isinstance(arg[1], DType), f"INS arg must be (instruction, DType), got {arg}"
       return arg[1]
     case Ops.INDEX:
       # an image access is always float, no matter the storage dtype
@@ -326,11 +322,6 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
       # a void CALL has no shape, the return value of a CALL has the shape of its dtype
       case Ops.CALL:
         return None if self.dtype is dtypes.void else ()
-
-      # INS shape is always scalar, vector width is in the instruction encoding
-      case Ops.INS:
-        if self.dtype is dtypes.void: return None
-        return ()
 
       # special (terrible) case for RESHAPE on NOOP
       case Ops.RESHAPE:
@@ -588,7 +579,8 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   @property
   def without_after(self) -> UOp: return self.src[0] if self.op is Ops.AFTER else self
   def barrier(self, *src:UOp): return UOp(Ops.BARRIER, src=(self,)+src)
-  def ins(self, arg, **kwargs): return UOp(Ops.INS, kwargs.pop("src", self.src), (arg, kwargs.pop("dtype", self.dtype)), kwargs.pop("tag", self.tag))
+  def ins(self, opcode, *src, **kwargs):
+    return UOp(Ops.CALL, (self,) + src, InstInfo(opcode, kwargs.pop("dtype", self.dtype)), tag=kwargs.pop("tag", self.tag))
   def contract(self, *rngs:UOp):
     assert all(x.arg[-1] == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
     return UOp.stack(*[self.substitute(dict(zip(rngs, [r.const_like(i) for r,i in zip(rngs, idx)])))
@@ -1329,6 +1321,12 @@ class CallInfo:
     gf = id(self.grad_fxn) if self.grad_fxn else None
     return f"CallInfo({gf}, {repr(self.name)}, {self.precompile}, {self.precompile_backward})" + \
       (f", {self.dtype}" if self.dtype is not dtypes.void else "")
+
+@dataclass(frozen=True)
+class InstInfo:
+  opcode: Any
+  dtype: DType = dtypes.void
+  def __reduce__(self): return (InstInfo, (self.opcode, self.dtype))
 
 # ******** ops in python ********
 

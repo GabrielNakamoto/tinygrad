@@ -23,7 +23,9 @@ class Ops(FastEnum):
 
   # uops that aren't rendered
   NOOP = auto(); REWRITE_ERROR = auto()
-  # CALL is a kernel invocation; calls with RETURNED inputs are value-producing (and gradient-able), the rest are opaque
+  # CALL is a function application over an opaque SINK and bound arguments; either representing a kernel
+  # ands it input BUFFERs or a machine code instruction and its encodeable operands.
+  # CALLs with RETURNED inputs are value-producing (and gradient-able), the rest are opaque
   PARAM = auto(); CALL = auto()
 
   # renderer
@@ -77,9 +79,6 @@ class Ops(FastEnum):
 
   # CUSTOM/CUSTOMI are used to output strings into codegen. the I makes the string inline
   CUSTOM = auto(); CUSTOMI = auto()
-
-  # INS is a machine instruction
-  INS = auto()
 
   # ** 6 -- ops that don't exist in programs **
 
