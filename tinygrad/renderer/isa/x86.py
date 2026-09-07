@@ -14,8 +14,8 @@ from tinygrad.helpers import unwrap, Target
 
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
-  # these aren't real instructions, DEFINE is a register placeholder that defines a register without emitting an instruction
-  FRAME_INDEX = auto(); LABEL = auto(); DEFINE = auto(); LOOP_CMP = auto()
+  # these aren't real instructions
+  FRAME_INDEX = auto(); LOOP_CMP = auto()
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -159,7 +159,8 @@ pre_isel_matcher = PatternMatcher([
 ])
 
 # ***** X86 registers *****
-def def_reg(dt:DType, reg:Register) -> UOp: return UOp(Ops.INS, arg=(X86Ops.DEFINE, dt), tag=(reg,))
+# TODO: cleaner slot assignment, currently prevented from folding because of different tags
+def def_reg(dt:DType, reg:Register) -> UOp: return UOp.placeholder((1,), dt, -999, AddrSpace.REG, tag=(reg,))
 # undefined operand, used for VEX instructions
 def undef(): return UOp(Ops.NOOP)
 
@@ -295,8 +296,6 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
   return X86Ops.VMOVSSm
 
 def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
-  # register placeholders with real registers
-  if x.op is Ops.INS and x.arg[0] is X86Ops.DEFINE and x.tag is not None: return None
   if x.op is Ops.INS and x.arg[0] is X86Ops.LOOP_CMP: return None
   # this is an immediate
   if x.op is Ops.INS and x.arg[0] is X86Ops.FRAME_INDEX: return None
@@ -481,7 +480,7 @@ pre_regalloc_matcher = PatternMatcher([
 # TODO: control flow should be overhauled so that this isn't necessary
 def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   loop_label = "_".join(str(i) for i in x.arg[:-1])
-  label = UOp(Ops.INS, arg=(X86Ops.LABEL, dtypes.void), tag=f".LOOP_{loop_label}")
+  label = UOp(Ops.NOOP, tag=f".LOOP_{loop_label}")
   # loop, cmp on backedge all we need is a jmp tag
   if x.dtype is dtypes.void: return (label, [label])
   else:
@@ -492,7 +491,7 @@ def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
     return (acc, [acc, label, cmp, jump_out])
 
 def lower_end(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
-  end_label = UOp(Ops.INS, arg=(X86Ops.LABEL, dtypes.void), tag=f".LOOP_OUT_{ctx.loop_label[x.src[1]]}")
+  end_label = UOp(Ops.NOOP, tag=f".LOOP_OUT_{ctx.loop_label[x.src[1]]}")
   jmp = UOp(Ops.INS, arg=(X86Ops.JMP, dtypes.void), tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
   inc = x.src[1].ins(X86Ops.ADDi, src=(imm(x.src[1].dtype, 1),))
   return (inc, [inc, jmp, end_label])
@@ -505,8 +504,8 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 # final rewrite to match the isa spec
 post_regalloc_matcher = PatternMatcher([
   # the frame is allocated after the stack pointer define at the top of the program and freed before RET
-  (UPat(Ops.INS, name="x"), lambda ctx,x: (x, [x, x.ins(X86Ops.SUBi, src=(imm(dtypes.int32, ctx.stack_size),))])
-    if ctx.stack_size and x.arg[0] is X86Ops.DEFINE and rdef(x) == RSP else None),
+  (UPat(Ops.BUFFER, name="x"), lambda ctx,x: (x, [x, x.ins(X86Ops.SUBi, src=(imm(dtypes.int32, ctx.stack_size),))])
+    if ctx.stack_size and rdef(x) == RSP else None),
   (UPat(Ops.INS, name="x"), lambda ctx,x: (x, [stack_pointer.ins(X86Ops.ADDi, src=(imm(dtypes.int32, ctx.stack_size),)), x])
     if ctx.stack_size and x.arg[0] is X86Ops.RET else None),
   # rewrite FRAME_INDEX to IMM now that the stack size is known
@@ -743,8 +742,8 @@ class X86Renderer(ISARenderer):
 
     asm = [f".{function_name}:"]
     for u in uops:
-      if u.op is not Ops.INS or u.arg[0] is X86Ops.DEFINE: continue
-      if u.arg[0] is X86Ops.LABEL: asm.append(f"{str(u.tag)}:")
+      if u.op is not Ops.INS: continue
+      if u.op is Ops.NOOP and isinstance(u.tag, str): asm.append(f"{str(u.tag)}:")
       elif u.arg[0] is X86Ops.RET: asm.append(_format_op(u))
       else: asm.append(_format_op(u) + " " + _format_operands(u))
     return "\n".join(asm)
@@ -754,9 +753,9 @@ class X86Renderer(ISARenderer):
     jumps: dict[UOp, int] = {}
     binary = bytearray()
     for u in uops:
-      if u.op is not Ops.INS or u.arg[0] is X86Ops.DEFINE: continue
+      if u.op is not Ops.INS: continue
       if u.arg[0] is X86Ops.LOOP_CMP: continue
-      if u.arg[0] is X86Ops.LABEL:
+      if u.op is Ops.NOOP and isinstance(u.tag, str):
         targets[u.tag] = len(binary)
         continue
       if u.arg[0] not in encodings or (l:=encodings[u.arg[0]](u)) is None:
