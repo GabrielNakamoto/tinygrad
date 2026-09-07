@@ -580,7 +580,9 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   def without_after(self) -> UOp: return self.src[0] if self.op is Ops.AFTER else self
   def barrier(self, *src:UOp): return UOp(Ops.BARRIER, src=(self,)+src)
   def ins(self, opcode, *src, **kwargs):
-    return UOp(Ops.CALL, (self,) + src, InstInfo(opcode, kwargs.pop("dtype", self.dtype)), tag=kwargs.pop("tag", self.tag))
+    assert "src" not in kwargs, "pass instruction srcs positionally: x.ins(op, s0, s1)"
+    return UOp(Ops.CALL, src or self.src, InstInfo(opcode, kwargs.pop("dtype", self.dtype)), tag=kwargs.pop("tag", self.tag))
+  def is_ins(self) -> bool: return self.op is Ops.CALL and isinstance(self.arg, InstInfo)
   def contract(self, *rngs:UOp):
     assert all(x.arg[-1] == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
     return UOp.stack(*[self.substitute(dict(zip(rngs, [r.const_like(i) for r,i in zip(rngs, idx)])))
