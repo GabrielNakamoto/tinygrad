@@ -15,7 +15,7 @@ from tinygrad.helpers import unwrap, Target
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
   # these aren't real instructions
-  FRAME_INDEX = auto(); LOOP_CMP = auto()
+  LOOP_CMP = auto()
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -271,7 +271,8 @@ def abi(ctx:IselContext, x:UOp) -> UOp|None:
   # the shape srcs of a PARAM are not values, tag them so they aren't materialized into registers
   def _reg_arg(r:Register) -> tuple[UOp, ...]: return (x.replace(arg=arg, src=tuple(s.rtag() for s in x.src), tag=(r,)),)
   def _stack_arg(disp:int):
-    return (stack_pointer, UOp(Ops.NOOP), UOp(Ops.INS, arg=(X86Ops.FRAME_INDEX, dtypes.int32), src=(imm(dtypes.int32, disp),)), imm(dtypes.uint8, 8))
+    frame = UOp(Ops.CUSTOM, src=(UOp.cconst(disp, dtypes.int32),), arg=("FRAME_INDEX", dtypes.void))
+    return (stack_pointer, UOp(Ops.NOOP), frame, imm(dtypes.uint8, 8))
   if sys.platform == "win32": src = _reg_arg((RCX, RDX, GPR[8], GPR[9])[i]) if i < 4 else _stack_arg((i-3)*8+32)
   else: src = _reg_arg((RDI, RSI, RDX, RCX, GPR[8], GPR[9])[i]) if i < 6 else _stack_arg((i-5)*8)
   # this move "cleanses" the abi register constraint
@@ -297,8 +298,6 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
 
 def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
   if x.op is Ops.INS and x.arg[0] is X86Ops.LOOP_CMP: return None
-  # this is an immediate
-  if x.op is Ops.INS and x.arg[0] is X86Ops.FRAME_INDEX: return None
   # no register definition
   if x.dtype is dtypes.void: return None
   # already allocated vregs
@@ -509,8 +508,8 @@ post_regalloc_matcher = PatternMatcher([
   (UPat(Ops.INS, name="x"), lambda ctx,x: (x, [stack_pointer.ins(X86Ops.ADDi, src=(imm(dtypes.int32, ctx.stack_size),)), x])
     if ctx.stack_size and x.arg[0] is X86Ops.RET else None),
   # rewrite FRAME_INDEX to IMM now that the stack size is known
-  (UPat(Ops.INS, src=(UPat.cvar("disp").cast(),), name="x"), lambda ctx,disp,x:
-    (nx:=UOp.cconst(ctx.stack_size + disp.val, x.dtype), [nx]) if x.arg[0] is X86Ops.FRAME_INDEX else None),
+  (UPat(Ops.CUSTOM, src=(Upat.cvar("disp").cast(),), name="x"), lambda x:
+    (nx:=UOp.cconst(ctx.stack_size + disp.val, x.dtype), [nx]) if x.arg[0] is "FRAME_INDEX" else None),
   # expand the cmp here so we can preserve rng src edge to get label from ctx
   (UPat(Ops.INS, name="x"), lambda ctx,x: lower_loop(ctx, x) if x.arg[0] is X86Ops.LOOP_CMP else None),
   # rewrite RANGE to ACC = 0 -> LABEL -> JUMP if ACC >= loop bound
