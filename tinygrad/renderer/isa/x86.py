@@ -710,16 +710,14 @@ class X86Renderer(ISARenderer):
 
   def spill(self, spill_slot:int, x:UOp) -> UOp:
     is_xmm = isinstance(x.tag, tuple) and x.tag[0].cons[0].size == 16
-    op = X86Ops.VMOVUPSm if is_xmm else X86Ops.MOVm
     disp = UOp.cconst(spill_slot, dtypes.int32)
-    return UOp(Ops.INS, src=fold_address(stack_pointer.index(disp)) + (x,), arg=(op, dtypes.void), tag=x.tag)
+    return x.ins(X86Ops.VMOVUPSm if is_xmm else X86Ops.MOVm, *fold_address(stack_pointer.index(disp)) + (x,), dtype=dtypes.void, tag=x.tag)
 
   # the value of a BUFFER is its address, it moves through registers and the stack as a 64bit int
   def fill(self, spill_slot:int, x:UOp, reg:Register) -> UOp:
     is_xmm = reg.cons[0].size == 16
-    dt = dtypes.uint64 if x.op is Ops.BUFFER else x.dtype
     disp = UOp.cconst(spill_slot, dtypes.int32)
-    return UOp(Ops.INS, src=fold_address(stack_pointer.index(disp)), arg=(X86Ops.VMOVUPS if is_xmm else X86Ops.MOV, dt), tag=(reg,))
+    return x.ins(X86Ops.VMOVUPS if is_xmm else X86Ops.MOV, *fold_address(stack_pointer.index(disp)), tag=(reg,))
 
   def asm_str(self, uops:list[UOp], function_name:str) -> str:
     def _format_op(x:UOp) -> str: return f"    {(o[7:-1] if (o:=str(x.arg.opcode))[-1] in ('i', 'm') else o[7:]).lower():7s}"
