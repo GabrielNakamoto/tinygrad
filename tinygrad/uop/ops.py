@@ -531,7 +531,7 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   def has_unbound_outputs(self) -> bool:
     """does this call still have unresolved outputs: unbound BUFFERs among its inputs (minted by call_with_outputs,
     resolved when the call is inlined or the outputs are materialized). a lifecycle query, not a call type"""
-    return self.op is Ops.CALL and any(x.unsharded_base.is_unbound for x in self.src[1:])
+    return self.op is Ops.CALL and isinstance(self.arg, CallInfo) and any(x.unsharded_base.is_unbound for x in self.src[1:])
   @property
   def unbound_outputs(self) -> tuple[UOp, ...]:
     """the unresolved outputs of this call: an AFTER on each unbound BUFFER input, usable like a normal buffer"""
@@ -1718,7 +1718,7 @@ class RewriteContext:
         # no rewrite, process children then come back to rebuild
         stack.append((n, True))
         # CALL bodies are never rewritten separately, rewrites that need them pass enter_calls=True
-        if n.op is Ops.CALL and not self.enter_calls: self.replace[n.src[0]] = n.src[0]
+        if n.op is Ops.CALL and isinstance(n.arg, CallInfo) and not self.enter_calls: self.replace[n.src[0]] = n.src[0]
         for x in reversed(n.src):
           if x not in self.replace: stack.append((x, False))
       else:
@@ -1757,7 +1757,7 @@ class RewriteContext:
         stack.append((n, 1, new_n))
         # NOTE: CALLs are handled as a special case: their bodies are not included in the graph_rewrite,
         # rewrites that need them pass enter_calls=True
-        if new_n.op is Ops.CALL and not self.enter_calls: self.replace[new_n.src[0]] = new_n.src[0]
+        if new_n.op is Ops.CALL and isinstance(new_n.arg, CallInfo) and not self.enter_calls: self.replace[new_n.src[0]] = new_n.src[0]
         for x in reversed(new_n.src):
           if x in on_stack: continue
           stack.append((x, 0, x))
