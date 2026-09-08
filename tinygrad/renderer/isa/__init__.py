@@ -33,6 +33,7 @@ class LinearContext:
     self.ren, self.stack_size = ren, 0
     self.loop_label: dict[UOp, str] = {}
   def assign_spill_slot(self, r:Register, u:UOp) -> Any: raise NotImplementedError("arch specific")
+  def init_stack(self, lst:list[UOp]) -> list[UOp]: return lst
 
 class ISARenderer(Renderer):
   pre_isel_matcher: PatternMatcher

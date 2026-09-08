@@ -320,7 +320,7 @@ isel_matcher = PatternMatcher([
     #lambda x,cond: cond.ins(X86Ops.LOOP_CMP, tag=cond.op, src=cond.src + x.src[:2])),
   # **** Op -> X86Op ****
   # add callee saved registers to the RET, these will be scheduled at the top of the kernel and will be saved/restored if they are used in regalloc
-  # so regalloc builds the prologue/epilogue naturally. they all share the stack pointer define's dtype so the the stack pointer define is first
+  # so regalloc builds the prologue/epilogue naturally
   (UPat(Ops.SINK, name="x"), lambda x:
    x.replace(src=(x.ins(X86Ops.RET, *x.src, stack_pointer, *(def_reg(dtypes.uint64, r) for r in CALLEE_SAVED)),))
     if not x.src or not x.src[0].is_ins() or x.src[0].arg.opcode is not X86Ops.RET else None),
@@ -501,11 +501,6 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 # final rewrite to match the isa spec
 post_regalloc_matcher = PatternMatcher([
   # the frame is allocated after the stack pointer define at the top of the program and freed before RET
-  (UPat(Ops.BUFFER, name="x"), lambda ctx,x: (x, [x, x.ins(X86Ops.SUBi, imm(dtypes.int32, ctx.stack_size))])
-    if ctx.stack_size and rdef(x) == RSP else None),
-  (UPat(Ops.CALL, name="x"), lambda ctx,x: (x, [stack_pointer.ins(X86Ops.ADDi, imm(dtypes.int32, ctx.stack_size)), x])
-    if ctx.stack_size and x.arg.opcode is X86Ops.RET else None),
-  # rewrite FRAME_INDEX to IMM now that the stack size is known
   (UPat(Ops.CUSTOM, src=(UPat.cvar("disp").cast(),), name="x"), lambda x:
     (nx:=UOp.cconst(ctx.stack_size + disp.val, x.dtype), [nx]) if x.arg[0] == "FRAME_INDEX" else None),
   # expand the cmp here so we can preserve rng src edge to get label from ctx
@@ -515,8 +510,8 @@ post_regalloc_matcher = PatternMatcher([
   # rewrite END to ACC + 1 -> JUMP -> LABEL, also add the out of loop JUMP to the src so this becomes the jump target
   (UPat(Ops.END, name="x"), lower_end),
   # rewrite two address instructions to two address form, if reused src wasn't coalesced insert a move
-  (UPat(Ops.CALL, name="x"), lambda ctx,x: (nx:=x.replace(src=x.src[1:]),
-   [ctx.ren.copy(x.src[0], rdef(x)), nx] if rdef(x) != rdef(x.src[0]) else [nx]) if x.arg.opcode in X86GroupOp.TwoAddress else None),
+  (UPat(Ops.CALL, name="x"), lambda ctx,x: (nx:=x.replace(src=(x.src[0],) + x.src[2:]),
+   [ctx.ren.copy(x.src[1], rdef(x)), nx] if rdef(x) != rdef(x.src[1]) else [nx]) if x.arg.opcode in X86GroupOp.TwoAddress else None),
 ])
 
 # ***** X86 instruction encoding *****
@@ -691,6 +686,11 @@ class X86LinearContext(LinearContext):
     offset = self.stack_size + (sz - self.stack_size % sz) %sz
     self.stack_size = offset + sz
     return offset
+  def init_stack(self, lst:list[UOp]) -> list[UOp]:
+    if self.stack_size:
+      lst.insert(1, stack_pointer.ins(X86Ops.SUBi, imm(dtypes.int32, self.stack_size)))
+      lst.insert(-2, stack_pointer.ins(X86Ops.ADDi, imm(dtypes.int32, self.stack_size)))
+    return lst
 
 class X86Renderer(ISARenderer):
   device = "CPU"
