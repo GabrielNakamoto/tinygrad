@@ -338,10 +338,10 @@ isel_matcher = PatternMatcher([
   (UPat.cvar("c").cast(dtypes.floats, name="x"), lambda c,x:
    UOp.cconst(struct.unpack((dt:=to_int(x.dtype)).fmt, struct.pack(x.dtype.fmt, c.val))[0], dt).bitcast(x.dtype) if not x.tag else None),
   # conditional moves that use masks, the mask has the width of the values
-  (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float32), UPat()), name="m").where(UPat.var("a", dtypes.float32), UPat.var("b")), lambda m,a,b:
-   a.ins(X86Ops.VBLENDVPS, b, a, mask(m))),
-  (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float64), UPat()), name="m").where(UPat.var("a", dtypes.float64), UPat.var("b")), lambda m,a,b:
-   a.ins(X86Ops.VBLENDVPD, b, a, mask(m))),
+  (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float32), UPat()), name="m").where(UPat.var("a", dtypes.float32), UPat.var("b")).named("x"),
+    lambda x,m,a,b: x.ins(X86Ops.VBLENDVPS, b, a, mask(m))),
+  (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float64), UPat()), name="m").where(UPat.var("a", dtypes.float64), UPat.var("b")).named("x"),
+    lambda x,m,a,b: x.ins(X86Ops.VBLENDVPD, b, a, mask(m))),
   # in this case we have a mask producing comparison whose user expects a bool, so we convert to bool
   (UPat(GroupOp.Comparison, src=(UPat.var("y", (dtypes.float32, dtypes.float64)), UPat()), name="x"), lambda y,x:
    UOp(Ops.AND, src=(mask(x).bitcast(dt:=to_int(y.dtype)), UOp.cconst(1, dt))).bitcast(dtypes.bool)),
@@ -349,11 +349,11 @@ isel_matcher = PatternMatcher([
   # TODO: remove this once we allow all flag producing ops in cmove
   # the blends took every float gate a mask can serve, so a gate that is still not an integer comparison becomes one here
   (UPat.var("m", dtypes.bool).where(UPat.var("a"), UPat.var("b")), lambda m,a,b: g.where(a, b) if (g:=flag_gate(m)) is not None else None),
-  (UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.sints), UPat()), name="m").where(UPat.var("a"), UPat.var("b")), lambda m,a,b:
-   a.ins(X86Ops.CMOVL, b, a, cmp(m))),
-  (UPat(Ops.CMPLT, name="m").where(UPat.var("a"), UPat.var("b")), lambda m,a,b: a.ins(X86Ops.CMOVB, b, a, cmp(m))),
-  (UPat(Ops.CMPEQ, name="m").where(UPat.var("a"), UPat.var("b")), lambda m,a,b: a.ins(X86Ops.CMOVE, b, a, cmp(m))),
-  (UPat(Ops.CMPNE, name="m").where(UPat.var("a"), UPat.var("b")), lambda m,a,b: a.ins(X86Ops.CMOVNE, b, a, cmp(m))),
+  (UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.sints), UPat()), name="m").where(UPat.var("a"), UPat.var("b")).named("x"),
+    lambda x,m,a,b: x.ins(X86Ops.CMOVL, b, a, cmp(m))),
+  (UPat(Ops.CMPLT, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: x.ins(X86Ops.CMOVB, b, a, cmp(m))),
+  (UPat(Ops.CMPEQ, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: x.ins(X86Ops.CMOVE, b, a, cmp(m))),
+  (UPat(Ops.CMPNE, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: x.ins(X86Ops.CMOVNE, b, a, cmp(m))),
   # jumps, use flags
   (UPat(Ops.IF, src=(UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.uints), UPat()), name="y"),), name="x"), lambda y,x: x.ins(X86Ops.JB, cmp(y))),
   (UPat(Ops.IF, src=(UPat(Ops.CMPLT, name="y"),), name="x"), lambda y,x: x.ins(X86Ops.JL, cmp(y))),
@@ -381,29 +381,29 @@ isel_matcher = PatternMatcher([
   # int binary
   ((UPat(dtype=dtypes.ints).alu(Ops.CDIV, UPat())).named("x"), idiv),
   # int binary with immediate
-  (UPat.var("a", dtypes.ints) << UPat.cvar("c").cast(), lambda a,c: a.ins(X86Ops.SHLi, a, imm(dtypes.uint8, c.val))),
-  (UPat.var("a", dtypes.uints) >> UPat.cvar("c").cast(), lambda a,c: a.ins(X86Ops.SHRi, a, imm(dtypes.uint8, c.val))),
-  (UPat.var("a", dtypes.sints) >> UPat.cvar("c").cast(), lambda a,c: a.ins(X86Ops.SARi, a, imm(dtypes.uint8, c.val))),
-  (UPat.var("a", dtypes.ints) + UPat.cvar().cast(name="c"), lambda a,c: a.ins(X86Ops.ADDi, a, i) if (i:=to_imm(c)) is not None else None),
-  (UPat.var("a", dtypes.ints) * UPat.cvar().cast(name="c"), lambda a,c: a.ins(X86Ops.IMULi, a, i) if (i:=to_imm(c)) is not None else None),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.cvar().cast(name="c"),
-   lambda a,c: a.ins(X86Ops.ANDi, a, i) if (i:=to_imm(c)) is not None else None),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) | UPat.cvar().cast(name="c"),
-   lambda a,c: a.ins(X86Ops.ORi, a, i) if (i:=to_imm(c)) is not None else None),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) ^ UPat.cvar().cast(name="c"),
-   lambda a,c: a.ins(X86Ops.XORi, a, i) if (i:=to_imm(c)) is not None else None),
-  (UPat(Ops.SUB, dtypes.ints, (UPat.var("a"), UPat.cvar().cast(name="c"))),
-   lambda a,c: a.ins(X86Ops.SUBi, a, i) if (i:=to_imm(c)) is not None else None),
+  ((UPat.var("a", dtypes.ints) << UPat.cvar("c").cast()).named("x"), lambda x,a,c: x.ins(X86Ops.SHLi, a, imm(dtypes.uint8, c.val))),
+  ((UPat.var("a", dtypes.uints) >> UPat.cvar("c").cast()).named("x"), lambda x,a,c: x.ins(X86Ops.SHRi, a, imm(dtypes.uint8, c.val))),
+  ((UPat.var("a", dtypes.sints) >> UPat.cvar("c").cast()).named("x"), lambda x,a,c: x.ins(X86Ops.SARi, a, imm(dtypes.uint8, c.val))),
+  ((UPat.var("a", dtypes.ints) + UPat.cvar().cast(name="c")).named("x"), lambda x,a,c: x.ins(X86Ops.ADDi, a, i) if (i:=to_imm(c)) is not None else None),
+  ((UPat.var("a", dtypes.ints) * UPat.cvar().cast(name="c")).named("x"), lambda x,a,c: x.ins(X86Ops.IMULi, a, i) if (i:=to_imm(c)) is not None else None),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.cvar().cast(name="c")).named("x"),
+   lambda x,a,c: x.ins(X86Ops.ANDi, a, i) if (i:=to_imm(c)) is not None else None),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) | UPat.cvar().cast(name="c")).named("x"),
+   lambda x,a,c: x.ins(X86Ops.ORi, a, i) if (i:=to_imm(c)) is not None else None),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) ^ UPat.cvar().cast(name="c")).named("x"),
+   lambda x,a,c: x.ins(X86Ops.XORi, a, i) if (i:=to_imm(c)) is not None else None),
+  (UPat(Ops.SUB, dtypes.ints, (UPat.var("a"), UPat.cvar().cast(name="c")), name="x"),
+   lambda x,a,c: x.ins(X86Ops.SUBi, a, i) if (i:=to_imm(c)) is not None else None),
   # int binary with register
   ((UPat(dtype=dtypes.ints) << UPat()).named("x"), lambda x: shift(x, X86Ops.SHL)),
   ((UPat(dtype=dtypes.uints) >> UPat()).named("x"), lambda x: shift(x, X86Ops.SHR)),
   ((UPat(dtype=dtypes.sints) >> UPat()).named("x"), lambda x: shift(x, X86Ops.SAR)),
-  ((UPat.var("a", dtypes.ints) + UPat.var("b")).named("x"), lambda a,b,x: x.ins(X86Ops.ADD, a, b)),
-  (UPat.var("a", dtypes.ints) * UPat.var("b"), lambda a,b: a.ins(X86Ops.IMUL, a, b)),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.var("b"), lambda a,b: a.ins(X8Ops.AND, a, b)),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) | UPat.var("b"), lambda a,b: a.ins(X86Ops.OR, a, b)),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) ^ UPat.var("b"), lambda a,b: a.ins(X86Ops.XOR, a, b)),
-  (UPat(Ops.SUB, dtypes.ints, (UPat.var("a"), UPat.var("b"))), lambda a,b: a.ins(X86Ops.SUB, a, b)),
+  ((UPat.var("a", dtypes.ints) + UPat.var("b")).named("x"), lambda x,a,b: x.ins(X86Ops.ADD, a, b)),
+  ((UPat.var("a", dtypes.ints) * UPat.var("b")).named("x"), lambda x,a,b: x.ins(X86Ops.IMUL, a, b)),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.var("b")).named("x"), lambda x,a,b: x.ins(X86Ops.AND, a, b)),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) | UPat.var("b")).named("x"), lambda x,a,b: x.ins(X86Ops.OR, a, b)),
+  ((UPat.var("a", dtypes.ints+(dtypes.bool,)) ^ UPat.var("b")).named("x"), lambda x,a,b: x.ins(X86Ops.XOR, a, b)),
+  (UPat(Ops.SUB, dtypes.ints, (UPat.var("a"), UPat.var("b")), name="x"), lambda x,a,b: x.ins(X86Ops.SUB, a, b)),
   # float binary
   ((UPat(dtype=dtypes.float32) + UPat()).named("x"), lambda x: x.ins(X86Ops.VADDSS)),
   ((UPat(dtype=dtypes.float64) + UPat()).named("x"), lambda x: x.ins(X86Ops.VADDSD)),
@@ -503,8 +503,8 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 # final rewrite to match the isa spec
 post_regalloc_matcher = PatternMatcher([
   # the frame is allocated after the stack pointer define at the top of the program and freed before RET
-  (UPat(Ops.CALL, src=(UPat(), UPat.cvar("disp").cast(),), name="x"), lambda x,disp:
-    (nx:=imm(x.dtype, ctx.stack_size + disp.val), [nx]) if x.arg.opcode is X86Ops.FRAME_INDEX else None),
+  (UPat(Ops.CALL, src=(UPat(), UPat.cvar("disp").cast(),), name="x"), lambda ctx,x,disp:
+    (nx:=imm(dtypes.int32, ctx.stack_size + disp.val), [nx]) if x.arg.opcode is X86Ops.FRAME_INDEX else None),
   # expand the cmp here so we can preserve rng src edge to get label from ctx
   # (UPat(Ops.INS, name="x"), lambda ctx,x: lower_loop(ctx, x) if x.arg[0] is X86Ops.LOOP_CMP else None),
   # rewrite RANGE to ACC = 0 -> LABEL -> JUMP if ACC >= loop bound
