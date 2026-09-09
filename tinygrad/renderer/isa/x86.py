@@ -482,15 +482,14 @@ def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   if x.dtype is dtypes.void: return (label, [label])
   else:
     acc = x.ins(X86Ops.MOVi, imm(x.dtype, 0), *x.src[1:])
-    cmp = UOp(Ops.INS, arg=(X86Ops.CMPi if x.src[0].op is Ops.CAST else X86Ops.CMP, dtypes.void), src=(acc, x.src[0]))
-    jump_out = UOp(Ops.INS, arg=(X86Ops.JGE, dtypes.void), src=(cmp,), tag=f".LOOP_OUT_{loop_label}")
+    cmp = UOp(Ops.NOOP).ins(X86Ops.CMPi if x.src[0].op is Ops.CAST else X86Ops.CMP, acc, x.src[0], dtype=dtypes.void)
+    jump_out = cmp.ins(X86Ops.JGE, cmp, dtype=dtypes.void, tag=f".LOOP_OUT_{loop_label}")
     ctx.loop_label[acc] = loop_label
     return (acc, [acc, label, cmp, jump_out])
 
 def lower_end(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   end_label = UOp(Ops.NOOP, tag=f".LOOP_OUT_{ctx.loop_label[x.src[1]]}")
-  jmp = x.call(X86Ops.JMP, dtype=dtypes.void, tag=f".LOOP_{ctx.loop_labe[x.src[1]]}")
-  # jmp = UOp(Ops.INS, arg=(X86Ops.JMP, dtypes.void), tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
+  jmp = x.ins(X86Ops.JMP, dtype=dtypes.void, tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
   inc = x.src[1].ins(X86Ops.ADDi, imm(x.src[1].dtype, 1))
   return (inc, [inc, jmp, end_label])
 
