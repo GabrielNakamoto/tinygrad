@@ -14,6 +14,8 @@ from tinygrad.helpers import unwrap, Target
 
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
+  # pseudo instructions
+  DEFINE = auto()
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -157,8 +159,7 @@ pre_isel_matcher = PatternMatcher([
 ])
 
 # ***** X86 registers *****
-# TODO: cleaner slot assignment, currently prevented from folding because of different tags
-def def_reg(dt:DType, reg:Register) -> UOp: return UOp.placeholder((1,), dt, -999, AddrSpace.REG, tag=(reg,))
+def def_reg(dt:DType, reg:Register) -> UOp: return UOp(Ops.NOOP).ins(X86Ops.DEFINE, dtype=dt, tag=(reg,))
 # undefined operand, used for VEX instructions
 def undef(): return UOp(Ops.NOOP)
 
@@ -280,7 +281,7 @@ GPR_DEST_OPS = {X86Ops.VPEXTRW, X86Ops.VPEXTRD, X86Ops.VCVTTSS2SI, X86Ops.VCVTTS
 XMM_OPS = {op for op in X86Ops if op.name.startswith('V')} - GPR_DEST_OPS
 
 def _is_vec_xmm(y: UOp) -> bool:
-  return (y.is_ins() and y.arg.opcode in XMM_OPS) or (y.op not in (Ops.BUFFER, Ops.PARAM, Ops.AFTER, Ops.CALL) and y.max_numel() > 1)
+  return (y.op is Ops.CALL and y.arg.opcode in XMM_OPS) or (y.op not in (Ops.BUFFER, Ops.PARAM, Ops.AFTER, Ops.CALL) and y.max_numel() > 1)
 
 def _xmm_sz(x: UOp) -> X86Ops:
   bits = x.max_numel() * x.dtype.itemsize
@@ -303,7 +304,7 @@ def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
   defs = []
   if isinstance(x.tag, tuple): defs = [ctx.vreg(x.tag)]
   elif x.op is Ops.BUFFER: defs = [ctx.vreg(WGPR)]
-  elif x.dtype in dtypes.floats or (x.is_ins() and x.arg.opcode in XMM_OPS) or x.max_numel() > 1: defs = [ctx.vreg(XMM)]
+  elif x.dtype in dtypes.floats or (x.op is Ops.CALL and x.arg.opcode in XMM_OPS) or x.max_numel() > 1: defs = [ctx.vreg(XMM)]
   elif x.dtype in dtypes.ints+(dtypes.bool,): defs = [ctx.vreg(WGPR)]
   # TODO: add this once the scheduler can track register pressure
   # if x.arg.opcode in X86GroupOp.WriteFlags: defs.append(ctx.vreg(RFLAGS))
@@ -602,7 +603,7 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
 
   if x.arg.opcode in X86GroupOp.Rm2nd:
     if len(oprs) > 4: address, rest = oprs[1:5], oprs[:1] + oprs[5:]
-    else: address, rest = (oprs), oprs[:1] + oprs[2:]
+    else: address, rest = (oprs[1], None, None, None), oprs[:1] + oprs[2:]
     # cmp reg, rm doesn't define a new register
     return _encode(x, *address, *rest) if x.dtype is not dtypes.void else _encode(rest[0], *address)
 
@@ -708,7 +709,7 @@ class X86Renderer(ISARenderer):
     super().__init__(target)
     from tinygrad.runtime.support.compiler_cpu import X86Compiler
     self.compiler = X86Compiler()
-  def is_two_address(self, x:UOp) -> bool: return x.is_ins() and x.arg.opcode in X86GroupOp.TwoAddress
+  def is_two_address(self, x:UOp) -> bool: return x.op is Ops.CALL and x.arg.opcode in X86GroupOp.TwoAddress
   def copy(self, x:UOp, reg:Register) -> UOp: return x.ins(X86Ops.MOV, x, tag=reg)
 
   def spill(self, spill_slot:int, x:UOp) -> UOp:
@@ -742,7 +743,7 @@ class X86Renderer(ISARenderer):
     asm = [f".{function_name}:"]
     for u in uops:
       if u.op is Ops.NOOP and isinstance(u.tag, str): asm.append(f"{str(u.tag)}:")
-      if not u.is_ins(): continue
+      if not u.op is Ops.CALL or u.arg.opcode is X86Ops.DEFINE: continue
       elif u.arg.opcode is X86Ops.RET: asm.append(_format_op(u))
       else: asm.append(_format_op(u) + " " + _format_operands(u))
     return "\n".join(asm)
@@ -755,7 +756,7 @@ class X86Renderer(ISARenderer):
       if u.op is Ops.NOOP and isinstance(u.tag, str):
         targets[u.tag] = len(binary)
         continue
-      if not u.is_ins(): continue
+      if not u.op is Ops.CALL or u.arg.opcode is X86Ops.DEFINE: continue
       if u.arg.opcode not in encodings or (l:=encodings[u.arg.opcode](u)) is None:
         raise RuntimeError(f"failed to encode {u.arg.opcode} with {u.dtype} srcs {[x.dtype for x in u.src]}")
       binary.extend(l)
