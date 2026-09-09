@@ -1328,6 +1328,7 @@ class InstInfo:
   opcode: Any
   dtype: DType = dtypes.void
   def __reduce__(self): return (InstInfo, (self.opcode, self.dtype))
+  def __repr__(self): return f"InstInfo({repr(self.opcode)}, {self.dtype})"
 
 # ******** ops in python ********
 

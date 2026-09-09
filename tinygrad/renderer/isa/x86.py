@@ -15,7 +15,7 @@ from tinygrad.helpers import unwrap, Target
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
   # pseudo instructions
-  DEFINE = auto()
+  DEFINE = auto(); FRAME_INDEX = auto();
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -270,7 +270,7 @@ def abi(ctx:IselContext, x:UOp) -> UOp|None:
   # the shape srcs of a PARAM are not values, tag them so they aren't materialized into registers
   def _reg_arg(r:Register) -> tuple[UOp, ...]: return (x.replace(arg=arg, src=tuple(s.rtag() for s in x.src), tag=(r,)),)
   def _stack_arg(disp:int):
-    frame = UOp(Ops.CUSTOM, src=(UOp.cconst(disp, dtypes.int32),), arg=("FRAME_INDEX", dtypes.void))
+    frame = UOp(Ops.NOOP).ins(X86Ops.FRAME_INDEX, imm(dtypes.int32, disp))
     return (stack_pointer, UOp(Ops.NOOP), frame, imm(dtypes.uint8, 8))
   if sys.platform == "win32": src = _reg_arg((RCX, RDX, GPR[8], GPR[9])[i]) if i < 4 else _stack_arg((i-3)*8+32)
   else: src = _reg_arg((RDI, RSI, RDX, RCX, GPR[8], GPR[9])[i]) if i < 6 else _stack_arg((i-5)*8)
@@ -296,6 +296,8 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
   return X86Ops.VMOVSSm
 
 def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
+  if x.op is Ops.CALL and x.arg.opcode is X86Ops.DEFINE and x.tag is not None: return None
+  if x.op is Ops.CALL and x.arg.opcode is X86Ops.FRAME_INDEX: return None
   # no register definition
   if x.dtype is dtypes.void: return None
   # already allocated vregs
@@ -396,9 +398,9 @@ isel_matcher = PatternMatcher([
   ((UPat(dtype=dtypes.ints) << UPat()).named("x"), lambda x: shift(x, X86Ops.SHL)),
   ((UPat(dtype=dtypes.uints) >> UPat()).named("x"), lambda x: shift(x, X86Ops.SHR)),
   ((UPat(dtype=dtypes.sints) >> UPat()).named("x"), lambda x: shift(x, X86Ops.SAR)),
-  (UPat.var("a", dtypes.ints) + UPat.var("b"), lambda a,b: a.ins(X86Ops.ADD, a, b)),
+  ((UPat.var("a", dtypes.ints) + UPat.var("b")).named("x"), lambda a,b,x: x.ins(X86Ops.ADD, a, b)),
   (UPat.var("a", dtypes.ints) * UPat.var("b"), lambda a,b: a.ins(X86Ops.IMUL, a, b)),
-  (UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.var("b"), lambda a,b: a.ins(X86Ops.AND, a, b)),
+  (UPat.var("a", dtypes.ints+(dtypes.bool,)) & UPat.var("b"), lambda a,b: a.ins(X8Ops.AND, a, b)),
   (UPat.var("a", dtypes.ints+(dtypes.bool,)) | UPat.var("b"), lambda a,b: a.ins(X86Ops.OR, a, b)),
   (UPat.var("a", dtypes.ints+(dtypes.bool,)) ^ UPat.var("b"), lambda a,b: a.ins(X86Ops.XOR, a, b)),
   (UPat(Ops.SUB, dtypes.ints, (UPat.var("a"), UPat.var("b"))), lambda a,b: a.ins(X86Ops.SUB, a, b)),
@@ -501,8 +503,8 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 # final rewrite to match the isa spec
 post_regalloc_matcher = PatternMatcher([
   # the frame is allocated after the stack pointer define at the top of the program and freed before RET
-  (UPat(Ops.CUSTOM, src=(UPat.cvar("disp").cast(),), name="x"), lambda x:
-    (nx:=UOp.cconst(ctx.stack_size + disp.val, x.dtype), [nx]) if x.arg[0] == "FRAME_INDEX" else None),
+  (UPat(Ops.CALL, src=(UPat(), UPat.cvar("disp").cast(),), name="x"), lambda x,disp:
+    (nx:=imm(x.dtype, ctx.stack_size + disp.val), [nx]) if x.arg.opcode is X86Ops.FRAME_INDEX else None),
   # expand the cmp here so we can preserve rng src edge to get label from ctx
   # (UPat(Ops.INS, name="x"), lambda ctx,x: lower_loop(ctx, x) if x.arg[0] is X86Ops.LOOP_CMP else None),
   # rewrite RANGE to ACC = 0 -> LABEL -> JUMP if ACC >= loop bound
