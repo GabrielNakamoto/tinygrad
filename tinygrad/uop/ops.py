@@ -1757,14 +1757,15 @@ class RewriteContext:
         stack.append((n, 1, new_n))
         # NOTE: CALLs are handled as a special case: their bodies are not included in the graph_rewrite,
         # rewrites that need them pass enter_calls=True
-        if new_n.op is Ops.CALL and isinstance(new_n.arg, CallInfo) and not self.enter_calls: self.replace[new_n.src[0]] = new_n.src[0]
+        if new_n.op is Ops.CALL and new_n.src[0] not in on_stack and not self.enter_calls: self.replace[new_n.src[0]] = new_n.src[0]
         for x in reversed(new_n.src):
           if x in on_stack: continue
           stack.append((x, 0, x))
           on_stack.add(x)
       elif stage == 1:
-        tmp = []
-        for x in new_n.src:
+        circular = new_n.op is Ops.CALL and not self.enter_calls
+        tmp = [new_n.src[0]] if circular else []
+        for x in (new_n.src[1:] if circular else new_n.src):
           if (rx:=self.replace.get(x, SENTINEL)) is SENTINEL:
             # source not ready: register in waitlist instead of spinning
             waitlist.setdefault(x, []).append((n, 1, new_n))
