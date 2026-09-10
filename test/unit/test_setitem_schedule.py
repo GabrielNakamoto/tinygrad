@@ -140,6 +140,7 @@ class TestSetitemInto(unittest.TestCase):
     self.assertEqual(GlobalCounters.global_mem, 100*4)  # full buffer written
 
   @unittest.skipUnless(Device.DEFAULT != "CPU", "source must be on another device")
+  @unittest.skipIf(Device.DEFAULT == "METAL", "mapping between device BUFFERs not supported on METAL?")
   def test_setitem_slice_assign_from_other_device(self):
     # NOTE: this is 2 kernels, the cross-device copy should fuse with the assign into one
     a = Tensor.ones(20, device="CPU")

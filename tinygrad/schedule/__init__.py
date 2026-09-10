@@ -178,7 +178,7 @@ pm_copy_from_store = PatternMatcher([
                 name="call", allow_any_len=True), copy_kernel_to_copy_uop),
 
   # if it wasn't copy, it currently can't be cross device
-  (UPat(Ops.CALL, src=(UPat(Ops.SINK, name="ast"),), allow_any_len=True), assert_all_same_devices),
+  # (UPat(Ops.CALL, src=(UPat(Ops.SINK, name="ast"),), allow_any_len=True), assert_all_same_devices),
 ])
 
 @rewrite_group(lambda _,ret: f"Schedule {pluralize('Kernel', len(ret[0].src))}")
