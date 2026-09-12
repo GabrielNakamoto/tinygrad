@@ -207,11 +207,15 @@ def mask(x:UOp) -> UOp:
 # vinsertps xmm2, xmm0, xmm1, imm
 # inserts any 32 bit element in xmm1 into any position in xmm0 according to immm, result is written to xmm2
 # this is the fallback slow case for when you can't match more a powerful shuffle
-def vinsertps(x:UOp) -> UOp:
+def vinsertps(ctx, x:UOp) -> UOp:
+  xmm = x.placeholder_like(999, addrspace=AddrSpace.REG)
+  # what is the tinygrad equivalent?
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
-    return x.ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
-  return functools.reduce(_insert, range(len(x.src)), undef())
+    d = imm(dtypes.uint8, v << 6 | i << 4)
+    impl = (buf := ctx.opr_like(ret)).after(buf.index(ctx.opr_like(d)).store(ctx.opr_like(s)))
+    return impl.ins(X86Ops.VINSERTPS, ret, s, d)
+  return functools.reduce(_insert, range(len(x.src)), xmm)
 
 # vpinsrd xmm2, xmm0, eax, imm
 # inserts the element in eax into any position in xmm0, result is written to xmm2 according to imm
@@ -255,8 +259,14 @@ def fold_address(x:UOp) -> tuple[UOp, UOp, UOp, UOp]:
   sz = imm(dtypes.uint8, base.dtype.itemsize)
   if idx.op is Ops.ADD and (c:=idx.src[1]).op is Ops.CAST and c.src[0].op is Ops.CONST:
     return (base, _cast(idx.src[0]), _disp(c.src[0].val * scale), sz)
-  if idx.op is Ops.CAST and idx.src[0].op is Ops.CONST: return (base, UOp(Ops.NOOP), _disp(idx.src[0].val * scale), sz)
+  # if idx.op is Ops.CAST and idx.src[0].op is Ops.CONST: return (base, UOp(Ops.NOOP), _disp(idx.src[0].val * scale), sz)
   return (base, _cast(idx), _disp(0), sz)
+
+def impl_mop(ctx, x:UOp):
+  base, idx, disp, sz = fold_address(x.src[0])
+  pb, pi, pd, ps = [ctx.opr_like(i) for i in [base, idx, disp, sz]]
+  addr = pb.bitcast(dtypes.uint8).index(pd + (pi * ps)).cast(dtypes.uint32)
+  return addr.store(ctx.opr_like(x.src[0])) if x.op is Ops.STORE else addr.load()
 
 # addresses are 64bit values
 def lea(x:UOp) -> UOp: return x.ins(X86Ops.LEA, *fold_address(x), dtype=dtypes.uint64)
@@ -443,9 +453,9 @@ isel_matcher = PatternMatcher([
    x.ins(_xmm_sz(x), *fold_address(a))),
   (UPat(Ops.LOAD, dtypes.ints+(dtypes.bool,), src=(UPat(name="a"),), name="x"), lambda x,a:
    x.ins(X86Ops.MOV, *fold_address(a)) if x.max_numel() == 1 else x.ins(_xmm_sz(x), *fold_address(a))),
-  (UPat.var("a").store(UPat.var("b", dtypes.floats), name="x"), lambda a,b,x:
+  (UPat.var("a").store(UPat.var("b", dtypes.floats), name="x"), lambda ctx,a,b,x:
    x.ins(X86Ops.VPEXTRW, *fold_address(a), b, imm(dtypes.uint8, 0)) if b.max_numel() * b.dtype.itemsize == 2 else
-   x.ins(_xmm_sz_m(b), *fold_address(a), b)),
+   impl_mop(ctx,x).ins(_xmm_sz_m(b), *fold_address(a), b)),
   (UPat.var("a").store(UPat.var("b", dtypes.ints+(dtypes.bool,)), name="x"), lambda a,b,x:
    x.ins(_xmm_sz_m(b), *fold_address(a), b) if b.max_numel() > 1 else
    x.ins(X86Ops.MOVm, *fold_address(a), b) if (i:=to_imm(b)) is None else x.ins(X86Ops.MOVi, *fold_address(a), i)),
