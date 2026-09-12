@@ -272,7 +272,7 @@ def impl_mop(ctx, x:UOp):
 def lea(x:UOp) -> UOp:
   pb, pi, pd, ps = [u.param_like(i) for i,u in enumerate(fold_address(x))]
   sink = pb.cast(dtypes.uint64) + (pd + (pi * ps)).cast(dtypes.uint64)
-  return sink.ins(X86Ops.LEA, *fold_address(x), dtype=dtypes.uint64)
+  return sink.ins(X86Ops.LEA, *fold_address(x), dtype=dtypes.uint64, tag=x.tag)
 
 def abi(ctx:IselContext, x:UOp) -> UOp|None:
   if isinstance(x.tag, tuple): return None
@@ -703,11 +703,9 @@ class X86LinearContext(LinearContext):
     return offset
   def init_stack(self, lst:list[UOp]) -> list[UOp]:
     if self.stack_size:
-      simpl = stack_pointer.alu(Ops.SUB, imm(dtypes.uint64, self.stack_size))
-      aimpl = stack_pointer + imm(dtypes.uint64, self.stack_size)
-      print(simpl.ins(X86Ops.SUBi))
-      lst.insert(1, simpl.ins(X86Ops.SUBi))
-      lst.insert(-2, aimpl.ins(X86Ops.ADDi))
+      sz = imm(dtypes.int32, self.stack_size)
+      lst.insert(1, stack_pointer.alu(Ops.SUB, sz).ins(X86Ops.SUBi, dtype=dtypes.uint64, tag=(RSP,)))
+      lst.insert(-2, stack_pointer.alu(Ops.ADD, sz).ins(X86Ops.ADDi, dtype=dtypes.uint64, tag=(RSP,)))
     return lst
 
 class X86Renderer(ISARenderer):

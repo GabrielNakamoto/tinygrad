@@ -446,8 +446,8 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     lst = sorted(lst, key=lambda u: u.op is not Ops.CALL or bool(u.src[1:]))
     regalloc_ctx = LinearScanRegallocContext(lin_ctx, lst, ctx)
     lst = line_rewrite(lst, pm_regalloc_rewrite, regalloc_ctx)
-    lst = line_rewrite(lst, ctx.post_regalloc_matcher, lin_ctx)
     lst = lin_ctx.init_stack(lst)
+    lst = line_rewrite(lst, ctx.post_regalloc_matcher, lin_ctx)
     if DEBUG >= 4: print(ctx.asm_str(lst, sink.arg.function_name))
   return prg.replace(src=prg.src + (UOp(Ops.LINEAR, src=tuple(lst)),))
 
