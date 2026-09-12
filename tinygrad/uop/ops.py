@@ -582,7 +582,11 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   def without_after(self) -> UOp: return self.src[0] if self.op is Ops.AFTER else self
   def barrier(self, *src:UOp): return UOp(Ops.BARRIER, src=(self,)+src)
   def ins(self, opcode:Any, *src, impl:UOp|None=None, **kwargs):
-    return UOp(Ops.CALL, (self,) + (src if len(src) else self.src), InstInfo(opcode, kwargs.pop("dtype", self.dtype)), tag=kwargs.pop("tag", self.tag))
+    sink, bound = self, src if len(src) else self.src
+    if sink.op is Ops.CAST and sink.src[0].op is Ops.CONST: sink = sink.param_like(0)
+    elif len(src) == 0 and self.op in GroupOp.Elementwise: sink = sink.replace(src=tuple(s.param_like(i) for i,s in enumerate(sink.src)))
+    assert sink.op in {Ops.NOOP, Ops.SINK} or len([u for u in sink.toposort() if u.op is Ops.PARAM]) == len(bound), f"every operand must be BOUND to SINK graph: sink op={sink.op}, opc={opcode}"
+    return UOp(Ops.CALL, (sink,) + bound, InstInfo(opcode, kwargs.pop("dtype", self.dtype)), tag=kwargs.pop("tag", self.tag))
   def contract(self, *rngs:UOp):
     assert all(x.arg[-1] == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
     return UOp.stack(*[self.substitute(dict(zip(rngs, [r.const_like(i) for r,i in zip(rngs, idx)])))

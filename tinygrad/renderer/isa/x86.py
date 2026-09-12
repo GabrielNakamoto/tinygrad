@@ -209,11 +209,11 @@ def mask(x:UOp) -> UOp:
 # this is the fallback slow case for when you can't match more a powerful shuffle
 def vinsertps(ctx, x:UOp) -> UOp:
   xmm = x.placeholder_like(999, addrspace=AddrSpace.REG)
-  # what is the tinygrad equivalent?
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
     d = imm(dtypes.uint8, v << 6 | i << 4)
-    impl = (buf := ctx.opr_like(ret)).after(buf.index(ctx.opr_like(d)).store(ctx.opr_like(s)))
+    buf, pd, ps = ret.param_like(0), d.param_like(1), s.param_like(2)
+    impl = buf.after(buf.index(pd).store(ps))
     return impl.ins(X86Ops.VINSERTPS, ret, s, d)
   return functools.reduce(_insert, range(len(x.src)), xmm)
 
@@ -264,12 +264,15 @@ def fold_address(x:UOp) -> tuple[UOp, UOp, UOp, UOp]:
 
 def impl_mop(ctx, x:UOp):
   base, idx, disp, sz = fold_address(x.src[0])
-  pb, pi, pd, ps = [ctx.opr_like(i) for i in [base, idx, disp, sz]]
+  pb, pi, pd, ps = [u.param_like(i) for i,u in enumerate([base, idx, disp, sz])]
   addr = pb.bitcast(dtypes.uint8).index(pd + (pi * ps)).cast(dtypes.uint32)
-  return addr.store(ctx.opr_like(x.src[0])) if x.op is Ops.STORE else addr.load()
+  return addr.store(x.src[0].param_like(4)) if x.op is Ops.STORE else addr.load()
 
 # addresses are 64bit values
-def lea(x:UOp) -> UOp: return x.ins(X86Ops.LEA, *fold_address(x), dtype=dtypes.uint64)
+def lea(x:UOp) -> UOp:
+  pb, pi, pd, ps = [u.param_like(i) for i,u in enumerate(fold_address(x))]
+  sink = pb.cast(dtypes.uint64) + (pd + (pi * ps)).cast(dtypes.uint64)
+  return sink.ins(X86Ops.LEA, *fold_address(x), dtype=dtypes.uint64)
 
 def abi(ctx:IselContext, x:UOp) -> UOp|None:
   if isinstance(x.tag, tuple): return None
@@ -700,8 +703,11 @@ class X86LinearContext(LinearContext):
     return offset
   def init_stack(self, lst:list[UOp]) -> list[UOp]:
     if self.stack_size:
-      lst.insert(1, stack_pointer.ins(X86Ops.SUBi, imm(dtypes.int32, self.stack_size)))
-      lst.insert(-2, stack_pointer.ins(X86Ops.ADDi, imm(dtypes.int32, self.stack_size)))
+      simpl = stack_pointer.alu(Ops.SUB, imm(dtypes.uint64, self.stack_size))
+      aimpl = stack_pointer + imm(dtypes.uint64, self.stack_size)
+      print(simpl.ins(X86Ops.SUBi))
+      lst.insert(1, simpl.ins(X86Ops.SUBi))
+      lst.insert(-2, aimpl.ins(X86Ops.ADDi))
     return lst
 
 class X86Renderer(ISARenderer):

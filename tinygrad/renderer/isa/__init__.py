@@ -18,16 +18,10 @@ class Register:
 
 class IselContext:
   def __init__(self, sink:UOp):
-    self.reg_n, self.param_slot = itertools.count(), itertools.count()
+    self.reg_n = itertools.count()
     def arg_key(u:UOp): return (1, u.arg) if u.op is Ops.SPECIAL else (0, u.arg.slot)
     self.func_args = sorted([u for u in sink.toposort() if u.op in {Ops.PARAM, Ops.SPECIAL}], key=arg_key)
 
-  # TODO: either put this in UOp or replace it with placeholder() or param()
-  def opr_like(self, x:UOp):
-    x = x.without_after
-    if x.op is Ops.CAST and x.src[0].op is Ops.CONST:
-      return UOp.param(next(self.param_slot), x.dtype, addrspace=AddrSpace.ALU, vmin_vmax=x.src[0]._min_max)
-    return UOp.param(next(self.param_slot), x.dtype, addrspace=AddrSpace.REG)
   def vreg(self, cons:tuple[Register, ...]|Register):
     return Register(f"v{next(self.reg_n)}", 0, _cons=cons if isinstance(cons, tuple) else (cons,))
 
