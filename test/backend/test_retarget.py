@@ -19,12 +19,16 @@ def _cross_exec(graph:Tensor) -> int:
     sink = graph_rewrite(sink, isa_ren.isel_matcher, ctx=IselContext(sink), name="instruction selection", bottom_up=True)
     sink = graph_rewrite(sink, PatternMatcher([]), name="view machine code")
 
-    # NOTE: slightly hacky with the negative slot to differentiate from device BUFFERs
-    pm_substitute_operands = PatternMatcher([
-      (UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.OPR else None)
-    ])
     # re-expand CALL graphs
-    sink = sink.substitute({c:graph_rewrite(c.src[0], pm_substitute_operands, ctx=c.src[1:]) for c in sink.toposort() if c.op is Ops.CALL})
+    # TODO: make this better, sucks (could add binding metadata in InstInfo?)
+    pm_embed_bodies = PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: graph_rewrite(
+      c.body,
+      PatternMatcher([(UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.OPR else None)]),
+      ctx=c.src[1:]
+      )),
+    ])
+    sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
+    # sink = sink.substitute({c:graph_rewrite(c.src[0], pm_substitute_operands, ctx=c.src[1:]) for c in sink.toposort() if c.op is Ops.CALL}, name="implement as UOps (embed bodies)")
 
     # plug through non-assembly backend's render pass
     prg_info = ProgramInfo.from_sink(sink, final_ren.target)
@@ -45,23 +49,22 @@ def _cross_exec(graph:Tensor) -> int:
 # TODO: verify post-linearize round trip?
 @unittest.skipUnless(isinstance(Device[Device.DEFAULT].renderer, ISARenderer), "cross compilation is for asm backends")
 class TestRetarget(unittest.TestCase):
+  def _helper_test_cross(self, ts:tuple[Tensor,...], op, atol=1e-6, rtol=1e-3):
+    Tensor.realize(*ts)
+    GlobalCounters.reset()
+    truth = op(*ts).realize()
+    expected = GlobalCounters.kernel_count
+    self.assertEqual(_cross_exec((out := op(*ts))), expected)
+    np.testing.assert_allclose(out.numpy(), truth.numpy(), atol=atol, rtol=rtol)
+
+  def test_transfer_plus(self):
+    self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a + b)
+  
   def test_transfer_gemm(self):
-    trt, tgt = prepare_test_op(-2, 2, [(32,32), (32,32)], None)
-    truth, out = torch.matmul(*trt), Tensor.matmul(*tgt)
-    _cross_exec(out)
-    np.testing.assert_allclose(out.numpy(), truth.detach().numpy(), atol=1e-6, rtol=1e-3)
+    self._helper_test_cross((Tensor.rand(32,32), Tensor.rand(32,32)), Tensor.matmul)
 
   def test_transfer_idiv(self):
-    x,y = Tensor([5, 6, 7]), Tensor([1, 2, 3])
-    Tensor.realize(x,y)
-    truth = x // y
-    GlobalCounters.reset()
-    truth.realize()
-    out = x // y
-    native = GlobalCounters.kernel_count
-    cross = _cross_exec(out)
-    self.assertEqual(native, cross)
-    np.testing.assert_allclose(out.numpy(), truth.numpy(), atol=1e-6, rtol=1e-3)
+    self._helper_test_cross((Tensor([5,6,7]),Tensor([1,2,3])), lambda x,y: x//y)
 
   def test_transfer_mnist_kernel_count(self):
     layers = [
@@ -74,15 +77,7 @@ class TestRetarget(unittest.TestCase):
       lambda x: x.flatten(1), nn.Linear(576, 1)]
 
     Tensor.realize(*[p.replace(Tensor.ones_like(p).contiguous()) for p in nn.state.get_parameters(layers)])
-    x = Tensor.rand(1, 1, 28, 28)
-    Tensor.realize(x)
-    ref, out = x.sequential(layers), x.sequential(layers)
-    GlobalCounters.reset()
-    truth = ref.numpy()
-    native = GlobalCounters.kernel_count
-    cross = _cross_exec(out)
-    self.assertEqual(native, cross)
-    np.testing.assert_allclose(out.numpy(), truth, atol=1e-6, rtol=1e-3)
+    self._helper_test_cross((Tensor.rand(1, 1, 28, 28),), lambda x: x.sequential(layers))
 
   def test_transfer_loop(self):
     from test.backend.test_wait_loop import wait_loop_kernel
