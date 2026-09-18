@@ -758,7 +758,7 @@ class X86Renderer(ISARenderer):
 
     asm = [f".{function_name}:"]
     for u in uops:
-      if (op:=u.opcode) is None or op is X86Ops.DEFINE: continue
+      if u.op is not Ops.CALL or (op:=u.opcode) is X86Ops.DEFINE: continue
       if op is X86Ops.LABEL: asm.append(f"{str(u.tag)}:")
       elif op is X86Ops.RET: asm.append(_format_op(u))
       else: asm.append(_format_op(u) + " " + _format_operands(u))
