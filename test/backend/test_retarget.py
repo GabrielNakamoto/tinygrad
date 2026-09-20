@@ -1,8 +1,8 @@
 import unittest, itertools, torch, numpy as np
 from tinygrad import Tensor, Device, dtypes, nn, GlobalCounters
 from tinygrad.helpers import VIZ
-from tinygrad.renderer.isa import ISARenderer, IselContext
-from tinygrad.uop.ops import graph_rewrite, PatternMatcher, UPat, UOp, Ops, ProgramInfo, AddrSpace
+from tinygrad.renderer.isa import ISARenderer, IselContext, Register
+from tinygrad.uop.ops import graph_rewrite, PatternMatcher, UPat, UOp, Ops, ProgramInfo, AddrSpace, GroupOp
 from tinygrad.codegen import full_rewrite_to_sink, pm_to_program
 from tinygrad.engine.realize import _get_call_to_compile, run_linear
 from test.backend.test_ops import prepare_test_op
@@ -21,14 +21,16 @@ def _cross_exec(graph:Tensor) -> int:
 
     # re-expand CALL graphs
     # TODO: make this better, sucks (could add binding metadata in InstInfo?)
-    pm_embed_bodies = PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: graph_rewrite(
-      c.body,
+    pm_embed_bodies = PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: graph_rewrite(c,
       PatternMatcher([(UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.OPR else None)]),
-      ctx=c.src[1:]
-      )),
+      ctx=c.src[1:], enter_calls=True).body),
+    ])
+    # strip tags on round trip to enable UOp coalescence
+    pm_strip_tags = PatternMatcher([
+      (UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if isinstance(x.tag, tuple) and isinstance(x.tag[0], Register) else None),
     ])
     sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
-    # sink = sink.substitute({c:graph_rewrite(c.src[0], pm_substitute_operands, ctx=c.src[1:]) for c in sink.toposort() if c.op is Ops.CALL}, name="implement as UOps (embed bodies)")
+    sink = graph_rewrite(sink, pm_strip_tags, name="remove register references")
 
     # plug through non-assembly backend's render pass
     prg_info = ProgramInfo.from_sink(sink, final_ren.target)
