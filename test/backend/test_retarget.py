@@ -28,6 +28,8 @@ def _cross_exec(graph:Tensor) -> int:
     # strip tags on round trip to enable UOp coalescence
     pm_strip_tags = PatternMatcher([
       (UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if isinstance(x.tag, tuple) and isinstance(x.tag[0], Register) else None),
+      # TODO: this handles x86s way of categorizing immediate lowering stage, should be fixed to not conflate tag spec
+      (UPat.cvar("c").cast(name="x"), lambda c,x: x.replace(tag=None) if x.tag else None),
     ])
     sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
     sink = graph_rewrite(sink, pm_strip_tags, name="remove register references")

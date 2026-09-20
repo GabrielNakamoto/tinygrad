@@ -238,7 +238,7 @@ def idiv(ctx:IselContext, x:UOp) -> UOp:
   defs = (ctx.vreg(RAX, x.dtype.itemsize),) if x.dtype in dtypes.int8s else (ctx.vreg(RAX, x.dtype.itemsize), ctx.vreg(RDX, x.dtype.itemsize))
   idiv = x.ins(op, dividend, divisor, *ext, tag=defs)
   # this move "cleanses" the register constraints (rax/rdx) of idiv as that only applies on definition and not on the uses of idiv
-  return UOp(Ops.NOOP).bitcast(x.dtype).ins(X86Ops.MOV, idiv)
+  return x.ins(X86Ops.MOV, idiv)
 
 # a variable shift count implicitly reads cl so it goes in rcx, the shifted value can't be in rcx
 def shift(x:UOp, op:X86Ops) -> UOp:
