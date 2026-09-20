@@ -41,12 +41,12 @@ def all_devices_in(d:Any, c:frozenset[str]) -> bool: return {x.split(":")[0] for
 
 def get_enqueue_devs(call:UOp) -> Any|None:
   if call.op is not Ops.CALL: return None # entries can be AFTER-wrapped calls
-  if call.body.op not in (Ops.PROGRAM, Ops.COPY): return None # only these bodies can be enqueued
+  if call.body.op not in (Ops.PROGRAM, Ops.STORE): return None # only these bodies can be enqueued
   if not (bufs:=get_call_arg_uops(call)): return None
-  if call.body.op is Ops.COPY: bufs = bufs[::-1] # copies push from the src device: p2p writes are faster than reads
+  if call.body.op is Ops.STORE: bufs = bufs[::-1] # copies push from the src device: p2p writes are faster than reads
   devs = min(bufs, key=lambda b: not all_devices_in(b.device, HCQ_DEVS)).device
   if not all_devices_in(devs, HCQ_DEVS): return None
-  if call.body.op is Ops.COPY and to_tuple(devs)[0].startswith("QCOM"): return None # QCOM is unified memory and uses host copies
+  if call.body.op is Ops.STORE and to_tuple(devs)[0].startswith("QCOM"): return None # QCOM is unified memory and uses host copies
   return devs
 
 def unwrap_view(v:UOp) -> tuple[UOp, int]: # look through views to (base, byte offset)
@@ -144,8 +144,8 @@ def split_rdma(call:UOp, dst:UOp, src:UOp) -> UOp|None:
 
   # wires: a placeholder per nic in place of the far gpu, tagged by it
   wires = [UOp.placeholder(src.max_shape, src.dtype, 0, device=unwrap(nic).device, tag=peer) for nic, peer in zip(nics, devs[::-1])]
-  send = call.replace(src=(call.src[0].replace(arg=wires[1].device), wires[1], src))
-  return UOp(Ops.LINEAR, src=(send, call.replace(src=(call.src[0], dst, wires[0]))))
+  send = call.replace(src=wires[1].store_call(src).src)
+  return UOp(Ops.LINEAR, src=(send, call.replace(src=dst.store_call(wires[0]).src)))
 
 def stage_copy(ctx:tuple[UOp, ...], call:UOp, dst:UOp, src:UOp) -> UOp|None:
   if any(to_tuple(b.device)[0].startswith("RDMA") for b in (dst, src)): return None # over the nic
@@ -159,7 +159,7 @@ def stage_copy(ctx:tuple[UOp, ...], call:UOp, dst:UOp, src:UOp) -> UOp|None:
     chunk = (STAGING_SIZE // STAGING_SLOTS) // it
     for i, off in enumerate(range(0, src.max_numel(), chunk)):
       stage, part = base[(so:=(i % STAGING_SLOTS) * chunk * it):so + (n:=min(chunk, src.max_numel() - off)) * it], src[off:off+n]
-      copies += [part.copy_to_device(staging.device).call(stage, part), stage.copy_to_device(dst.device).call(dst[off:off+n], stage)]
+      copies += [stage.store_call(part), dst[off:off+n].store_call(stage)]
     return UOp(Ops.LINEAR, src=tuple(copies))
 
   if Device[device].has_copy_queue: return None
@@ -168,8 +168,8 @@ def stage_copy(ctx:tuple[UOp, ...], call:UOp, dst:UOp, src:UOp) -> UOp|None:
   return lower_and_compile(call.replace(src=(ast, *call.src[1:])))
 
 pm_insert_copy_staging = PatternMatcher([
-  (UPat(Ops.CALL, src=(UPat(Ops.COPY), UPat(name="dst"), UPat(name="src")), name="call", allow_any_len=True), split_rdma),
-  (UPat(Ops.CALL, src=(UPat(Ops.COPY), UPat(name="dst"), UPat(name="src")), name="call", allow_any_len=True), stage_copy),
+  (UPat(Ops.CALL, src=(UPat(Ops.STORE), UPat(name="dst"), UPat(name="src")), name="call", allow_any_len=True), split_rdma),
+  (UPat(Ops.CALL, src=(UPat(Ops.STORE), UPat(name="dst"), UPat(name="src")), name="call", allow_any_len=True), stage_copy),
 ])
 
 # *****************
@@ -290,12 +290,12 @@ def sched_batches(l:UOp, profile:bool) -> UOp:
   devs = [() if (d:=get_enqueue_devs(c)) is None else tuple(Device.canonicalize(x) for x in to_tuple(d)) for c in l.src]
 
   # assign to queues
-  peers = sorted({Device.canonicalize(d) for c in l.src if c.op is Ops.CALL and c.body.op is Ops.COPY
+  peers = sorted({Device.canonicalize(d) for c in l.src if c.op is Ops.CALL and c.body.op is Ops.STORE
                   for b in get_call_arg_uops(c) for d in to_tuple(b.device) if d.split(":")[0] == "AMD"})
   num_queues = max(1, getenv("HCQ_NUM_SDMA", min(len(peers), 8) if ALL2ALL >= 1 else 1))
   queues = ["COMPUTE:0" if c.op is Ops.CALL and c.body.op is Ops.PROGRAM else "COPY:0" for c in l.src]
   for i, c in enumerate(l.src):
-    if c.op is Ops.CALL and c.body.op is Ops.COPY and all(b.device in peers for b in get_call_arg_uops(c)):
+    if c.op is Ops.CALL and c.body.op is Ops.STORE and all(b.device in peers for b in get_call_arg_uops(c)):
       queues[i] = f"COPY:{(peers.index(c.src[1].device) - peers.index(c.src[2].device) - 1) % len(peers) % num_queues}"
 
   srcs:list[UOp] = []
@@ -318,7 +318,7 @@ class HWQueue:
   q_rewrite = PatternMatcher([
     # rewrites from calls
     (UPat(Ops.CALL, src=(UPat(Ops.PROGRAM, name="prg"),), name="call", allow_any_len=True), lambda ctx, call, prg: ctx.exec(call, prg)),
-    (UPat(Ops.CALL, src=(UPat(Ops.COPY), UPat(name="dst"), UPat(name="src")), allow_any_len=True),
+    (UPat(Ops.CALL, src=(UPat(Ops.STORE), UPat(name="dst"), UPat(name="src")), allow_any_len=True),
      lambda ctx, dst, src: ctx.copy(dst, src, src.max_numel() * src.dtype.itemsize)),
     
     # ins
@@ -570,9 +570,7 @@ def resolve_getaddr(ctx:LinkCtx, g:UOp) -> UOp|None:
 
 def fold_binary(buf:UOp, blob:UOp) -> UOp:
   base, off = unwrap_view(buf)
-  if getattr(b:=cast(Buffer, base.buffer), '_hcq_written', {}).get(off) is not blob.arg: # TODO: remove me
-    cast(Any, b.ensure_allocated())._hcq_written = getattr(b, '_hcq_written', {}) | {off: blob.arg}
-    b.host.view(fmt='B')[off:off + len(blob.arg)] = blob.arg
+  cast(Buffer, base.buffer).ensure_allocated().host.view(fmt='B')[off:off + len(blob.arg)] = blob.arg
   return UOp(Ops.NOOP)
 
 def fold_words(buf:UOp, offs:UOp, ws:UOp, r:UOp|None=None) -> UOp:
@@ -588,17 +586,20 @@ def fold_words(buf:UOp, offs:UOp, ws:UOp, r:UOp|None=None) -> UOp:
   return UOp(Ops.NOOP)
 
 pm_link = PatternMatcher([
+  # collapse committed const conversions
   (UPat(Ops.CAST, src=(UPat(Ops.CAST, src=(UPat.cvar(),), name="inner"),), name="c"), lambda c, inner: inner.src[0].cast(c.dtype)),
+  # a placeholder becomes a buffer
   (UPat(Ops.PARAM, name="b"), lambda ctx, b: ctx.inputs[b] if b in ctx.inputs else bufferize_buf(ctx, b)),
+  # the address of a buffer is a const
   (UPat(Ops.GETADDR, name="g"), resolve_getaddr),
-  (UPat(GroupOp.ALU, src=UPat.cvar().or_casted(), name="a"),
-    lambda a: UOp.const(exec_alu(a.op, a.dtype, [s.val for s in a.src], False), a.dtype)),
+  # math on consts is a const
+  (UPat(GroupOp.ALU, src=UPat.cvar().or_casted(), name="a"), lambda a: UOp.const(exec_alu(a.op, a.dtype, [s.val for s in a.src], False), a.dtype)),
+  # fold rules
   (UPat(name="buf").store(UPat.any(UPat(Ops.BINARY, name="blob"), UPat(Ops.BINARY, name="blob").bitcast())), fold_binary),
-  (UPat(name="buf").index(UPat(Ops.STACK, src=UPat.cvar().or_casted(), name="offs")).store(UPat(Ops.STACK, src=UPat.cvar().or_casted(), name="ws")),
-    fold_words),
+  (UPat(name="buf").index(UPat(Ops.STACK, src=UPat.cvar(), name="offs")).store(UPat(Ops.STACK, src=UPat.cvar().or_casted(), name="ws")), fold_words),
   (UPat(name="buf").index(UPat(Ops.STACK, name="offs")).store(UPat(Ops.STACK, name="ws")).end(UPat(Ops.RANGE, name="r")), fold_words),
-  (UPat(Ops.AFTER, src=(UPat(Ops.CALL),), allow_any_len=True, name="a"),
-    lambda a: a.src[0].after(*(s for s in a.src[1:] if s.op is not Ops.NOOP))),
+  # a call keeps the deps that are not written yet
+  (UPat(Ops.AFTER, src=(UPat(Ops.CALL),), allow_any_len=True, name="a"), lambda a: a.src[0].after(*(s for s in a.src[1:] if s.op is not Ops.NOOP))),
   (UPat(Ops.AFTER, name="a"), lambda a: None if a.is_bound_var or a.src[0].op is Ops.CALL else
    a.src[0] if all(s.op is Ops.NOOP for s in a.src[1:]) else panic(RuntimeError, f"unresolved link words on {a.src[0].op}")),
 ])
