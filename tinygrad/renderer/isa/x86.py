@@ -200,7 +200,7 @@ def to_imm(c:UOp) -> UOp|None:
 # operand is NaN, so a NaN reads as "below" and as "equal", and it clears sign and overflow, so nothing reads as "less"
 def cmp(x:UOp) -> UOp:
   if x.src[0].dtype in dtypes.floats: raise RuntimeError(f"no flag compare for {x.src[0].dtype}, a float gate must be a mask")
-  return x.bitcast(dtypes.void).ins(X86Ops.CMP, *x.src) if (i:=to_imm(x.src[1])) is None else x.bitcast(dtypes.void).ins(X86Ops.CMPi, x.src[0], i)
+  return x.ins(X86Ops.CMP, *x.src) if (i:=to_imm(x.src[1])) is None else x.ins(X86Ops.CMPi, x.src[0], i)
 # comparisons that produce masks, the mask has the width of the operands
 def mask(x:UOp) -> UOp:
   dt, v = x.src[0].dtype, imm(dtypes.uint8, {Ops.CMPLT: 1, Ops.CMPNE: 4, Ops.CMPEQ: 0}[x.op])
@@ -300,7 +300,7 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
 
 def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
   # register placeholders with real registers
-  if x.op is Ops.CALL and x.opcode in {X86Ops.DEFINE, X86Ops.FRAME_INDEX}: return None
+  if x.op is Ops.CALL and x.opcode in {X86Ops.DEFINE, X86Ops.FRAME_INDEX, X86Ops.CMP, X86Ops.CMPi}: return None
   # no register definition
   if x.dtype is dtypes.void: return None
   # already allocated vregs
@@ -502,7 +502,7 @@ def lower_end(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 
 def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   cond, cjmp = x.src[-1], {Ops.CMPLT:X86Ops.JL, Ops.CMPEQ:X86Ops.JE, Ops.CMPNE:X86Ops.JNE}
-  op = X86Ops.JB if (cmp := cond.body.src[0]).op is Ops.CMPLT and cmp.src[0].dtype in dtypes.uints else cjmp[cmp.op]
+  op = X86Ops.JB if (cmp := cond.body).op is Ops.CMPLT and cmp.src[0].dtype in dtypes.uints else cjmp[cmp.op]
   jmp = UOp(Ops.NOOP).ins(op, cond, tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
   return jmp, [jmp]
 
@@ -622,8 +622,7 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
   if x.arg.opcode in X86GroupOp.Rm2nd:
     if len(oprs) > 3: address, rest = oprs[1:4], oprs[:1] + oprs[4:]
     else: address, rest = (oprs[1], None, None), oprs[:1] + oprs[2:]
-    # cmp reg, rm doesn't define a new register
-    return _encode(x, *address, *rest) if x.dtype is not dtypes.void else _encode(rest[0], *address)
+    return _encode(rest[0], *address) if x.opcode in {X86Ops.CMP, X86Ops.CMPi} else _encode(x, *address, *rest)
 
   return None
 

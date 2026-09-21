@@ -70,7 +70,7 @@ class TestRetarget(unittest.TestCase):
   def test_transfer_idiv(self):
     self._helper_test_cross((Tensor([5,6,7]),Tensor([1,2,3])), lambda x,y: x//y)
 
-  def test_transfer_mnist_kernel_count(self):
+  def test_transfer_mnist(self):
     layers = [
       nn.Conv2d(1, 32, 5), Tensor.relu,
       nn.Conv2d(32, 32, 5), Tensor.relu,
