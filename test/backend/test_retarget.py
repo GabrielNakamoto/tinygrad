@@ -62,7 +62,7 @@ class TestRetarget(unittest.TestCase):
     np.testing.assert_allclose(out.numpy(), truth.numpy(), atol=atol, rtol=rtol)
 
   def test_transfer_plus(self):
-    self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a + b)
+    self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a.float() + b.float())
   
   def test_transfer_gemm(self):
     self._helper_test_cross((Tensor.rand(32,32), Tensor.rand(32,32)), Tensor.matmul)

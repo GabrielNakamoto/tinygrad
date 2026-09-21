@@ -212,14 +212,20 @@ def mask(x:UOp) -> UOp:
 def vinsertps(x:UOp) -> UOp:
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
-    return x.ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
+    lanes = [ret.index(imm(dtypes.uint16, j)) if j < i
+      else s if j == i else imm(x.dtype, 0) for j in range(len(x.src))]
+    return UOp.stack(*lanes).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
   return functools.reduce(_insert, range(len(x.src)), undef())
 
 # vpinsrd xmm2, xmm0, eax, imm
 # inserts the element in eax into any position in xmm0, result is written to xmm2 according to imm
 def vpins(x:UOp, srcs:tuple[UOp, ...]) -> UOp:
   op = {2: X86Ops.VPINSRW, 4: X86Ops.VPINSRD}[x.dtype.itemsize]
-  return functools.reduce(lambda ret,i: x.ins(op, ret, srcs[i], imm(dtypes.uint8, i)), range(len(srcs)), undef())
+  def _insert(ret:UOp, i:int):
+    lanes = [ret.index(imm(dtypes.uint16, j)) if j < i
+            else srcs[i] if i == j else imm(x.dtype, 0) for j in range(len(srcs))]
+    return UOp.stack(*lanes).ins(op, ret, srcs[i], imm(dtypes.uint8, i))
+  return functools.reduce(_insert, range(len(srcs)), undef())
 
 # we don't call ctx.vreg on the srcs to avoid duplicates, a rewrite will assign the tuple of valid registers to a vreg
 def idiv(ctx:IselContext, x:UOp) -> UOp:
