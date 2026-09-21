@@ -63,9 +63,15 @@ class TestRetarget(unittest.TestCase):
 
   def test_transfer_plus(self):
     self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a.float() + b.float())
+
+  def test_transfer_hplus(self):
+    self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a.half() + b.half())
   
   def test_transfer_gemm(self):
     self._helper_test_cross((Tensor.rand(32,32), Tensor.rand(32,32)), Tensor.matmul)
+
+  def test_transfer_hgemm(self):
+    self._helper_test_cross((Tensor.rand(32,32), Tensor.rand(32,32)), lambda x,y: x.half().matmul(y.half()))
 
   def test_transfer_idiv(self):
     self._helper_test_cross((Tensor([5,6,7]),Tensor([1,2,3])), lambda x,y: x//y)

@@ -4,7 +4,7 @@ from tinygrad import Device, Tensor, TinyJit, dtypes
 from tinygrad.device import Buffer
 from tinygrad.dtype import AddrSpace
 from tinygrad.helpers import Context, dedup, partition, unwrap
-from tinygrad.uop.ops import Ops, UOp, UPat, PatternMatcher, KernelInfo, InstInfo
+from tinygrad.uop.ops import Ops, UOp, UPat, PatternMatcher, KernelInfo, InstInfo, CallInfo
 from tinygrad.engine.realize import compile_linear, link_linear, lower_and_compile, run_linear
 from tinygrad.codegen import do_to_program
 from tinygrad.renderer.cstyle import CStyleLanguage
@@ -69,7 +69,8 @@ class TestHCQ2Deps(unittest.TestCase):
     dst, src = UOp.param(0, dtypes.uint8, 16, device="AMD:1"), UOp.param(1, dtypes.uint8, 16, device="AMD")
     with patch.object(type(Device), "__getitem__", return_value=SimpleNamespace(pm_batch=None)):
       batch = hcq2._finalize_batch(hcq2.BatchCtx([(dst.store_call(src), ("AMD",), "COPY:0")], False))
-    streams = {s.without_after.src[0].arg[1]: [u.opcode for u in s.without_after.src[0].src if u.op is Ops.CALL] for s in batch.src[0].src}
+    streams = {s.without_after.src[0].arg[1]: [u.opcode for u in s.without_after.src[0].src
+      if u.op is Ops.CALL and isinstance(u.arg, InstInfo)] for s in batch.src[0].src}
     # the copy queue waits for its device and for the peer, then signals and bumps. the peer waits for the signal before its bump
     self.assertEqual(streams, {"COPY:0": ["barrier", "wait", "wait", "store", "store"], "COMPUTE:0": ["barrier", "wait", "wait", "store"]})
 

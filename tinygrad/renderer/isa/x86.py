@@ -214,7 +214,8 @@ def vinsertps(x:UOp) -> UOp:
     s, v = base(x, i), lane(x, i)
     lanes = [ret.index(imm(dtypes.uint16, j)) if j < i
       else s if j == i else imm(x.dtype, 0) for j in range(len(x.src))]
-    return UOp.stack(*lanes).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
+    # NOTE: this bypasses STACK spec because of shape mismatch on base passthru
+    return UOp(Ops.STACK, src=tuple(lanes)).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
   return functools.reduce(_insert, range(len(x.src)), undef())
 
 # vpinsrd xmm2, xmm0, eax, imm
@@ -223,7 +224,7 @@ def vpins(x:UOp, srcs:tuple[UOp, ...]) -> UOp:
   op = {2: X86Ops.VPINSRW, 4: X86Ops.VPINSRD}[x.dtype.itemsize]
   def _insert(ret:UOp, i:int):
     lanes = [ret.index(imm(dtypes.uint16, j)) if j < i
-            else srcs[i] if i == j else imm(x.dtype, 0) for j in range(len(srcs))]
+            else srcs[i].bitcast(x.dtype) if i == j else imm(x.dtype, 0) for j in range(len(srcs))]
     return UOp.stack(*lanes).ins(op, ret, srcs[i], imm(dtypes.uint8, i))
   return functools.reduce(_insert, range(len(srcs)), undef())
 
