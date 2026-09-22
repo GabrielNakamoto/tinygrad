@@ -604,6 +604,8 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     if len(self.src) == 0 and len(src) == 1: sink = bind_opr(src[0], 0)
     else: # only value (register) producing operands are bound to the graph
       sink = self.substitute({s:bind_opr(s,i) for i,s in enumerate(src) if s.dtype is not dtypes.void})
+      # the body must never alias a live node in the graph
+      if sink is self: sink = self.rtag()
     return UOp(Ops.CALL, (sink,) + src, InstInfo(opc), kwargs.pop("tag", self.tag))
   def contract(self, *rngs:UOp):
     assert all(x.arg[-1] == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
@@ -1788,15 +1790,16 @@ class RewriteContext:
         stack.append((n, 1, new_n))
         # NOTE: CALLs are handled as a special case: their bodies are not included in the graph_rewrite,
         # rewrites that need them pass enter_calls=True
-        for x in reversed(new_n.src[1:] if new_n.op is Ops.CALL and not self.enter_calls else new_n.src):
+        if new_n.op is Ops.CALL and not self.enter_calls:
+          self.replace[new_n.body] = new_n.body
+          if new_n.body in waitlist: stack.extend(waitlist.pop(new_n.body))
+        for x in reversed(new_n.src):
           if x in on_stack: continue
           stack.append((x, 0, x))
           on_stack.add(x)
       elif stage == 1:
-        # NOTE: machine code CALLs get placed as the sink of their own rewrite must be excluded from normal waitlist handling to avoid cycle
-        circular = new_n.op is Ops.CALL and not self.enter_calls
-        tmp = [new_n.body] if circular else []
-        for x in (new_n.src[1:] if circular else new_n.src):
+        tmp = []
+        for x in new_n.src:
           if (rx:=self.replace.get(x, SENTINEL)) is SENTINEL:
             # source not ready: register in waitlist instead of spinning
             waitlist.setdefault(x, []).append((n, 1, new_n))
