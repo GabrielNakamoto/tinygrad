@@ -204,7 +204,7 @@ def cmp(x:UOp) -> UOp:
 # comparisons that produce masks, the mask has the width of the operands
 def mask(x:UOp) -> UOp:
   dt, v = x.src[0].dtype, imm(dtypes.uint8, {Ops.CMPLT: 1, Ops.CMPNE: 4, Ops.CMPEQ: 0}[x.op])
-  return x.bitcast(dt).ins(X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, *x.src, v)
+  return x.ins(X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, *x.src, v).bitcast(dt)
 
 # vinsertps xmm2, xmm0, xmm1, imm
 # inserts any 32 bit element in xmm1 into any position in xmm0 according to immm, result is written to xmm2

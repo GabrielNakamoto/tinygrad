@@ -9,8 +9,6 @@ def oprs(u:UOp) -> tuple[UOp, ...]: return u.src[1:] if u.op is Ops.CALL and u.b
 
 def linearize(sink:UOp) -> list[UOp]:
   # this is a toposort with priority
-  # TODO: how to handle CUSTOM_FUNCTION calls?
-  # - they need to be present in the linearized graph but generally we shouldnt enter calls
   lst = list(sink.toposort(enter_calls=False))
   out_degree:defaultdict[UOp, int] = defaultdict(int)
   priorities:dict[UOp, tuple[int, int, Any]] = {}

@@ -1751,7 +1751,7 @@ class RewriteContext:
         # no rewrite, process children then come back to rebuild
         stack.append((n, True))
         # CALL bodies are never rewritten separately, rewrites that need them pass enter_calls=True
-        if n.op is Ops.CALL and not self.enter_calls and isinstance(n.arg, CallInfo): self.replace[n.body] = n.body
+        if n.op is Ops.CALL and not self.enter_calls: self.replace[n.body] = n.body
         for x in reversed(n.src):
           if x not in self.replace: stack.append((x, False))
       else:
