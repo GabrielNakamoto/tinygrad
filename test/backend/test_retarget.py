@@ -6,6 +6,7 @@ from tinygrad.uop.ops import graph_rewrite, PatternMatcher, UPat, UOp, Ops, Prog
 from tinygrad.codegen import full_rewrite_to_sink, pm_to_program
 from tinygrad.engine.realize import _get_call_to_compile, run_linear
 from test.backend.test_ops import prepare_test_op
+from tinygrad.schedule.prepare import resolve_function
 
 def _cross_exec(graph:Tensor) -> int:
   device = Device[Device.DEFAULT]
@@ -19,18 +20,10 @@ def _cross_exec(graph:Tensor) -> int:
     sink = graph_rewrite(sink, isa_ren.isel_matcher, ctx=IselContext(sink), name="instruction selection", bottom_up=True)
     sink = graph_rewrite(sink, PatternMatcher([]), name="view machine code")
 
-    # re-expand CALL graphs
-    # TODO: make this better, sucks (could add binding metadata in InstInfo?)
-    pm_embed_bodies = PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: graph_rewrite(c,
-      PatternMatcher([(UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.REG else None)]),
-      ctx=c.src[1:], enter_calls=True).body),
-    ])
     # strip tags on round trip to enable UOp coalescence
-    pm_strip_tags = PatternMatcher([
-      (UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if (isinstance(x.tag, tuple) and isinstance(x.tag[0], Register)) \
-        or x.tag is True else None),
-    ])
-    sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
+    pm_strip_tags = PatternMatcher([(UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if (isinstance(x.tag, tuple) and isinstance(x.tag[0], Register)) or x.tag is True else None)])
+    # sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
+    sink = graph_rewrite(sink, PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: resolve_function(c))]), name="resolve instructions")
     sink = graph_rewrite(sink, pm_strip_tags, name="remove register references")
 
     # plug through non-assembly backend's render pass

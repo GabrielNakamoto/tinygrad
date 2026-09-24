@@ -545,7 +545,8 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     return self.src[0]
   @property
   def is_inline_call(self) -> bool:
-    return self.op is Ops.CALL and self.body.op is Ops.SINK and self.body.arg is None and not self.arg.precompile
+    return self.op is Ops.CALL and (isinstance(self.arg, InstInfo) or \
+      (self.body.op is Ops.SINK and self.body.arg is None and not self.arg.precompile))
   @property
   def has_unbound_outputs(self) -> bool:
     """does this call still have unresolved outputs: unbound BUFFERs among its inputs (minted by call_with_outputs,

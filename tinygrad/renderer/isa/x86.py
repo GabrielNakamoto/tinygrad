@@ -218,7 +218,7 @@ def mask(x:UOp) -> UOp:
 def vinsertps(x:UOp) -> UOp:
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
-    lanes = [bind_opr(ret,0).index(imm(dtypes.uint16, j)) if j < i
+    lanes = [bind_opr(ret if i==0 else ret.body,0).index(imm(dtypes.uint16, j)) if j < i
       else bind_opr(s,1) if j == i else imm(x.dtype, 0) for j in range(len(x.src))]
     # NOTE: this bypasses STACK spec because of shape mismatch on base passthru
     return UOp(Ops.STACK, src=tuple(lanes)).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
@@ -749,7 +749,9 @@ class X86Renderer(ISARenderer):
     from tinygrad.runtime.support.compiler_cpu import X86Compiler
     self.compiler = X86Compiler()
   def is_two_address(self, x:UOp) -> bool: return x.op is Ops.CALL and x.opcode in X86GroupOp.TwoAddress
-  def copy(self, x:UOp, reg:Register) -> UOp: return nins(x, X86Ops.MOV, x, tag=reg)
+  def copy(self, x:UOp, reg:Register) -> UOp:
+    return bind_opr(x,0).ins(X86Ops.MOV, x, tag=reg)
+    # return nins(x, X86Ops.MOV, x, tag=reg)
 
   def spill(self, spill_slot:int, x:UOp) -> UOp:
     op = X86Ops.VMOVUPSm if rdef(x).cons[0] in XMM else X86Ops.MOVm
