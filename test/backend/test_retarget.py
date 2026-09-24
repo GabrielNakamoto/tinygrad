@@ -22,14 +22,13 @@ def _cross_exec(graph:Tensor) -> int:
     # re-expand CALL graphs
     # TODO: make this better, sucks (could add binding metadata in InstInfo?)
     pm_embed_bodies = PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: graph_rewrite(c,
-      PatternMatcher([(UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.OPR else None)]),
+      PatternMatcher([(UPat(Ops.PARAM, name="p"), lambda ctx,p: ctx[p.arg.slot] if p.addrspace is AddrSpace.REG else None)]),
       ctx=c.src[1:], enter_calls=True).body),
     ])
     # strip tags on round trip to enable UOp coalescence
     pm_strip_tags = PatternMatcher([
-      (UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if isinstance(x.tag, tuple) and isinstance(x.tag[0], Register) else None),
-      # TODO: this handles x86s way of categorizing immediate lowering stage, should be fixed to not conflate tag spec
-      (UPat.cvar("c").cast(name="x"), lambda c,x: x.replace(tag=None) if x.tag else None),
+      (UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if (isinstance(x.tag, tuple) and isinstance(x.tag[0], Register)) \
+        or x.tag is True else None),
     ])
     sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
     sink = graph_rewrite(sink, pm_strip_tags, name="remove register references")

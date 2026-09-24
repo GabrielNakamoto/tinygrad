@@ -1,8 +1,9 @@
 from __future__ import annotations
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from tinygrad.renderer import Renderer
-from tinygrad.uop.ops import PatternMatcher, UOp, Ops
+from tinygrad.dtype import dtypes
+from tinygrad.uop.ops import PatternMatcher, UOp, Ops, GroupOp, AddrSpace
 from typing import Any
 
 @dataclass(frozen=True)
@@ -29,6 +30,25 @@ class IselContext:
 def rdef(u:UOp):
   if u.op in {Ops.NOOP, Ops.AFTER, Ops.BITCAST} and u.src: return rdef(u.src[0])
   return u.tag[0] if isinstance(u.tag, tuple) else u.tag
+
+def bind_opr(u:UOp, slot:int): return (p := u.param_like(slot)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
+def bind(graph:tuple[UOp,...]):
+  bound = {u:bind_opr(u,i) for i,u in enumerate(src) if src in graph}
+  return tuple(bound.get(u,u) for u in graph)
+
+# NOTE: should this be in the UOP constructor? semi arch dependent, nice to minimize hidden side effects
+def impl_ins(x:UOp, src:tuple[UOp,...]):
+  if x.op in {Ops.NOOP, Ops.RANGE}: return x
+  if x.op in {Ops.STACK, Ops.GROUP}: return x.replace(src= \
+    tuple(bind_opr(s,i) if s.dtype is not dtypes.void else x.src[i] for i,s in enumerate(src)))
+  if len(src) == 1 and len(x.src) == 0: return bind_opr(*src, 0)
+  # NOTE: NOOPs are sometimes used as encoding padding, discluded from arity
+  if x.op in {Ops.CAST, Ops.BITCAST}: return x.replace(src=(bind_opr(src[0], next(j for j,s in enumerate(src) if s.dtype is not dtypes.void)),))
+  if x.op in GroupOp.ALU|{Ops.INDEX}:
+    if len(x.src) == len(src):
+      return x.replace(src=tuple(bind_opr(s,i) for i,s in enumerate(src)))
+    return x.replace(src=bind(x.src))
+  raise NotImplementedError(f"cannot automatically implement op: {x.op}")
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):

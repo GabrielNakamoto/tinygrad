@@ -598,15 +598,7 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   @property
   def without_after(self) -> UOp: return self.src[0].without_after if self.op is Ops.AFTER else self
   def barrier(self, *src:UOp): return UOp(Ops.BARRIER, src=(self,)+src)
-  def ins(self, opc:Any, *src:UOp, **kwargs):
-    def bind_opr(u:UOp, slot:int): return (p := u.param_like(slot)).replace(arg=replace(p.arg, addrspace=AddrSpace.OPR))
-    # if there is only 1 UOp in the graph and 1 src its the exact implemenation
-    if len(self.src) == 0 and len(src) == 1: sink = bind_opr(src[0], 0)
-    else: # only value (register) producing operands are bound to the graph
-      sink = self.substitute({s:bind_opr(s,i) for i,s in enumerate(src) if s.dtype is not dtypes.void})
-      # the body must never alias a live node in the graph
-      if sink is self: sink = self.rtag()
-    return UOp(Ops.CALL, (sink,) + src, InstInfo(opc), kwargs.pop("tag", self.tag))
+  def ins(self, opc:Any, *src:UOp, **kwargs): return UOp(Ops.CALL, (self,) + src, InstInfo(opc), kwargs.pop("tag", None))
   def contract(self, *rngs:UOp):
     assert all(x.arg[-1] == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
     return UOp.stack(*[self.substitute(dict(zip(rngs, [r.const_like(i) for r,i in zip(rngs, idx)])))
