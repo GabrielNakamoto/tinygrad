@@ -33,12 +33,13 @@ def rdef(u:UOp):
 
 def bind_opr(u:UOp, slot:int): return (p := u.param_like(slot)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
 def bind(src:tuple[UOp,...], graph:tuple[UOp,...]):
-  bound = {u:bind_opr(u,i) for i,u in enumerate(src) if src in graph}
+  bound = {u:bind_opr(u,i) for i,u in enumerate(src) if u in graph}
   return tuple(bound.get(u,u) for u in graph)
 
 # NOTE: should this be in the UOP constructor? semi arch dependent, nice to minimize hidden side effects
 # NOTE: NOOPs are sometimes used as encoding padding, discluded from arity
 def impl_ins(x:UOp, src:tuple[UOp,...]):
+  assert x.op is not Ops.CALL, "an instruction should not be implemented by another instruction"
   if x.op in {Ops.NOOP, Ops.RANGE}: return x
   if x.op in {Ops.STACK, Ops.GROUP}:
     return x.replace(src=tuple(bind_opr(s,i) if s.dtype is not dtypes.void else x.src[i] for i,s in enumerate(src)))
@@ -47,7 +48,9 @@ def impl_ins(x:UOp, src:tuple[UOp,...]):
     # cant rely on arity because of NOOP padding?, should we use null edges for encoding metadata? probably belongs in arg (InstInfo)
     i,value = next((j,s) for j,s in enumerate(src) if s.dtype is not dtypes.void)
     return x.replace(src=(bind_opr(value, i),))
-  if x.op in GroupOp.ALU|{Ops.INDEX}:
+  if x.op is Ops.INDEX: # dont bind imm
+    return x.replace(src=(bind_opr(x.src[0],0), x.src[1]))
+  if x.op in GroupOp.ALU:
     if len(x.src) == len(src):
       return x.replace(src=tuple(bind_opr(s,i) for i,s in enumerate(src)))
     return x.replace(src=bind(src, x.src))

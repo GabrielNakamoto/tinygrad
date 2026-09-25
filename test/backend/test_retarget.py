@@ -8,6 +8,10 @@ from tinygrad.engine.realize import _get_call_to_compile, run_linear
 from test.backend.test_ops import prepare_test_op
 from tinygrad.schedule.prepare import resolve_function
 
+def resolve_scoped(c:UOp):
+  param_map = {p:c.src[1+p.arg.slot] for p in c.body.toposort() if p.op is Ops.PARAM and p.addrspace is AddrSpace.REG}
+  return c.body.substitute(param_map)
+
 def _cross_exec(graph:Tensor) -> int:
   device = Device[Device.DEFAULT]
   isa_ren, final_ren = device.renderer, next(r for r in device.renderers if not issubclass(r, ISARenderer))
@@ -23,7 +27,10 @@ def _cross_exec(graph:Tensor) -> int:
     # strip tags on round trip to enable UOp coalescence
     pm_strip_tags = PatternMatcher([(UPat(GroupOp.All, name="x"), lambda x: x.replace(tag=None) if (isinstance(x.tag, tuple) and isinstance(x.tag[0], Register)) or x.tag is True else None)])
     # sink = graph_rewrite(sink, pm_embed_bodies, name="implement as UOps (embed bodies)")
-    sink = graph_rewrite(sink, PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: resolve_function(c))]), name="resolve instructions")
+
+    # sink = graph_rewrite(sink, PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: resolve_function(c))]), name="resolve instructions")
+    sink = graph_rewrite(sink, PatternMatcher([(UPat(Ops.CALL, name="c"), lambda c: resolve_scoped(c))]), name="resolve instructions")
+    # sink = graph_rewrite(sionkl, pm_resolve_scoped,. name="resolve instructions")
     sink = graph_rewrite(sink, pm_strip_tags, name="remove register references")
 
     # plug through non-assembly backend's render pass
@@ -55,6 +62,9 @@ class TestRetarget(unittest.TestCase):
 
   def test_transfer_plus(self):
     self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a.float() + b.float())
+
+  def test_transfer_sum(self):
+    self._helper_test_cross((Tensor.ones(32),), Tensor.sum)
 
   def test_transfer_hplus(self):
     self._helper_test_cross((Tensor([1,2,3,4]), Tensor([27, 26, 25, 24])), lambda a,b: a.half() + b.half())

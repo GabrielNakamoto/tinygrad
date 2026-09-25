@@ -278,6 +278,8 @@ def bind_mop(slot:int, x:UOp, opc, *src, **kwargs):
   base = bind_opr(addr[0], slot)
   idx = x.src[0].src[1] if addr[1].op is Ops.NOOP else bind_opr(addr[1], slot+1)
   rest = tuple(bind_opr(s,i+slot+3) for i,s in enumerate(x.src[1:]))
+  if x.src[0].op is Ops.INDEX:
+    idx = idx + addr[2]
   buf = x.src[0].replace(src=(base,idx,*x.src[0].src[2:]))
   impl = buf.load(*rest) if x.op is Ops.LOAD else buf.store(*rest)
   return impl.ins(opc, *src, **kwargs)
@@ -536,13 +538,13 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
 def alloc_frame(ctx:X86LinearContext, x:UOp) -> tuple[UOp, list[UOp]]|None:
   if not ctx.stack_size or ctx.frame_allocated or x.opcode is X86Ops.DEFINE: return None
   ctx.frame_allocated = True
-  return (x, [nins(stack_pointer, X86Ops.SUBi, imm(dtypes.int32, ctx.stack_size)), x])
+  return (x, [UOp(Ops.NOOP).ins(X86Ops.SUBi, imm(dtypes.int32, ctx.stack_size), tag=stack_pointer.tag), x])
 
 # final rewrite to match the isa spec
 post_regalloc_matcher = PatternMatcher([
   # the frame is allocated before the first real instruction (see alloc_frame) and freed before RET
   (UPat(Ops.CALL, name="x"), alloc_frame),
-  (UPat(Ops.CALL, name="x"), lambda ctx,x: (x, [nins(stack_pointer, X86Ops.ADDi, imm(dtypes.int32, ctx.stack_size)), x])
+  (UPat(Ops.CALL, name="x"), lambda ctx,x: (x, [UOp(Ops.NOOP).ins(X86Ops.ADDi, imm(dtypes.int32, ctx.stack_size), tag=stack_pointer.tag), x])
     if ctx.stack_size and x.opcode is X86Ops.RET else None),
   # rewrite FRAME_INDEX to IMM now that the stack size is known
   (UPat(Ops.CALL, src=(UPat(), UPat.cvar("disp").cast()), name="x"), lambda ctx,disp,x:
@@ -756,11 +758,13 @@ class X86Renderer(ISARenderer):
   def spill(self, spill_slot:int, x:UOp) -> UOp:
     op = X86Ops.VMOVUPSm if rdef(x).cons[0] in XMM else X86Ops.MOVm
     disp = UOp.cconst(spill_slot, dtypes.int32)
-    return nins(UOp(Ops.NOOP), op, *fold_address(stack_pointer.index(disp)), x, tag=x.tag)
+    return UOp(Ops.NOOP).ins(op, *fold_address(stack_pointer.index(disp)), x, tag=x.tag)
+    # return nins(UOp(Ops.NOOP), op, *fold_address(stack_pointer.index(disp)), x, tag=x.tag)
 
   def fill(self, spill_slot:int, x:UOp, reg:Register) -> UOp:
     disp = UOp.cconst(spill_slot, dtypes.int32)
-    return nins(x, X86Ops.VMOVUPS if reg.cons[0] in XMM else X86Ops.MOV, *fold_address(stack_pointer.index(disp)), tag=(reg,))
+    return x.ins(X86Ops.VMOVUPS if reg.cons[0] in XMM else X86Ops.MOV, *fold_address(stack_pointer.index(disp)), tag=(reg,))
+    # return nins(x, X86Ops.VMOVUPS if reg.cons[0] in XMM else X86Ops.MOV, *fold_address(stack_pointer.index(disp)), tag=(reg,))
 
   def asm_str(self, uops:list[UOp], function_name:str) -> str:
     def _format_op(x:UOp) -> str: return f"    {(o[7:-1] if (o:=str(x.arg.opcode))[-1] in ('i', 'm') else o[7:]).lower():7s}"
