@@ -1,8 +1,9 @@
 from __future__ import annotations
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from tinygrad.renderer import Renderer
-from tinygrad.uop.ops import PatternMatcher, UOp, Ops
+from tinygrad.uop.ops import PatternMatcher, UOp, Ops, AddrSpace
+from tinygrad.dtype import dtypes
 from typing import Any
 
 @dataclass(frozen=True)
@@ -29,6 +30,22 @@ class IselContext:
 def rdef(u:UOp):
   if u.op in {Ops.NOOP, Ops.AFTER, Ops.BITCAST} and u.src: return rdef(u.src[0])
   return u.tag[0] if isinstance(u.tag, tuple) else u.tag
+
+# automatically implement machine instruction as minimal equivalent UOp graph pruned from upstream
+# with operands bound when possible as REG PARAMs -> arg
+# quality of implementations contingent on isel, certain instructions cannot be automatically represented
+# ex. VINSERTPS x86 which requires iterative implementation as values are inserted to STACK
+def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
+  def bind(i:int) -> UOp: return (p := oprs[i].param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
+  # operands are keyed by the pre-isel value they compute, the first slot wins for repeated operands
+  cut: dict[UOp, UOp] = {}
+  for i,o in enumerate(oprs):
+    if o.dtype is not dtypes.void: cut.setdefault(o.impl if o.is_ins else o, bind(i))
+  # stop traversing at operands, the body is only the cone between u and the cut
+  new: dict[UOp, UOp] = {}
+  for n in u.toposort(gate=lambda n: n not in cut):
+    new[n] = n.replace(src=tuple(new[s] if s in new else cut[s] for s in n.src)) if n.src else n
+  return (cut[u] if u in cut else new[u]).ins(opc, *oprs, **kwargs)
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):
