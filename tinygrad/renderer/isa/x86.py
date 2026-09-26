@@ -85,6 +85,29 @@ class X86GroupOp:
   Rm1st = {X86Ops.MOV, X86Ops.VMOVSS, X86Ops.VMOVSD, X86Ops.VMOVUPS, X86Ops.MOVZX, X86Ops.MOVSX, X86Ops.MOVSXD, X86Ops.VMOVD, X86Ops.VMOVQ,
            X86Ops.VCVTTSS2SI, X86Ops.VCVTTSD2SI, X86Ops.VCVTPH2PS, X86Ops.CMPi, X86Ops.IMULi, X86Ops.LEA, X86Ops.VPSRLDQ} | (Rm2nd & TwoAddress)
 
+# **** X86 UOp implementation ****
+
+def impl(u:UOp, opc:X86Ops, oprs:tuple[UOp,...]) -> UOp:
+  # reconstruct the smallest valid representation of an operation
+  # then toposort/substitute can be done efficiently?
+  # we substitute any operands that not void and are present in the graph like before
+  from dataclasses import replace
+  def bind(i:int) -> UOp:
+    if oprs[i].op is Ops.CAST and oprs[i].src[0].op is Ops.CONST: return u.src[i]
+    return (p := oprs[i].param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
+
+  if opc in X86GroupOp.Copy: body = bind(0)
+  elif u.op in GroupOp.Elementwise|{Ops.CAST, Ops.BITCAST}:
+    vals = [i for i,o in enumerate(oprs) if o.dtype is not dtypes.void]
+    body = u.replace(src=tuple(bind(i) for i in vals[:len(u.src)]))
+  elif u.op in {Ops.LOAD, Ops.STORE}:
+    idx = u.src[0].src[1]
+    if idx.src[0].op is Ops.ADD:
+      idx = idx.replace(src=(bind(1), idx.src[0].src[1]))
+    elif oprs[0].op is not Ops.NOOP: idx = bind(1)
+    buf = u.src[0].replace(src=(bind(0), idx, *u.src[0].src[2:]))
+    return u.replace(src=(buf,) + tuple(bind(i) for i in range(len(u.src) - 1)))
+
 # ***** X86 legalization *****
 
 extra_matcher = PatternMatcher([
