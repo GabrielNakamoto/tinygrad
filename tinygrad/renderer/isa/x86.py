@@ -202,7 +202,7 @@ def cmp(x:UOp) -> UOp:
 # comparisons that produce masks, the mask has the width of the operands
 def mask(x:UOp) -> UOp:
   dt, v = x.src[0].dtype, imm(dtypes.uint8, {Ops.CMPLT: 1, Ops.CMPNE: 4, Ops.CMPEQ: 0}[x.op])
-  return impl(x, X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, x.src + (v,))
+  return impl(x, X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, x.src + (v,)).bitcast(dt)
 
 # vinsertps xmm2, xmm0, xmm1, imm
 # inserts any 32 bit element in xmm1 into any position in xmm0 according to immm, result is written to xmm2
@@ -210,14 +210,20 @@ def mask(x:UOp) -> UOp:
 def vinsertps(x:UOp) -> UOp:
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
-    return impl(x, X86Ops.VINSERTPS, (ret, s, imm(dtypes.uint8, v << 6 | i << 4)))
-  return functools.reduce(_insert, range(len(x.src)), undef())
+    lanes = [ret.index(imm(dtypes.uint16,j)) for j in range(len(x.src))]
+    lanes[i] = s.index(imm(dtypes.uint16,v))
+    return UOp(Ops.STACK, src=tuple(lanes)).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
+  return functools.reduce(_insert, range(len(x.src)), UOp(Ops.STACK, src=tuple(imm(x.dtype, 0.0) for _ in range(len(x.src)))))
 
 # vpinsrd xmm2, xmm0, eax, imm
 # inserts the element in eax into any position in xmm0, result is written to xmm2 according to imm
 def vpins(x:UOp, srcs:tuple[UOp, ...]) -> UOp:
   op = {2: X86Ops.VPINSRW, 4: X86Ops.VPINSRD}[x.dtype.itemsize]
-  return functools.reduce(lambda ret,i: impl(x, op, (ret, srcs[i], imm(dtypes.uint8, i))), range(len(srcs)), undef())
+  def _pin(ret:UOp, i:int) -> UOp:
+    lanes = [ret.index(imm(dtypes.uint16,j)) for j in range(len(srcs))]
+    lanes[i] = srcs[i]
+    return UOp(Ops.STACK, src=tuple(lanes)).ins(op, ret, srcs[i], imm(dtypes.uint8, i))
+  return functools.reduce(_pin, range(len(srcs)), UOp(Ops.STACK, src=tuple(imm(x.dtype, 0) for _ in range(len(srcs)))))
 
 # we don't call ctx.vreg on the srcs to avoid duplicates, a rewrite will assign the tuple of valid registers to a vreg
 def idiv(ctx:IselContext, x:UOp) -> UOp:
@@ -296,7 +302,7 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
 
 def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
   # register placeholders with real registers
-  if x.op is Ops.CALL and x.opcode in {X86Ops.DEFINE, X86Ops.LOOP_CMP, X86Ops.FRAME_INDEX}: return None
+  if x.op is Ops.CALL and x.opcode in {X86Ops.CMP, X86Ops.CMPi, X86Ops.DEFINE, X86Ops.LOOP_CMP, X86Ops.FRAME_INDEX}: return None
   # no register definition
   if x.dtype is dtypes.void: return None
   # already allocated vregs
@@ -616,7 +622,7 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
     if len(x.src) > 4: address, rest = x.src[2:5], x.src[1:2] + x.src[5:]
     else: address, rest = (x.src[2], None, None), x.src[1:2] + x.src[3:]
     # cmp reg, rm doesn't define a new register
-    return _encode(x, *address, *rest) if x.dtype is not dtypes.void else _encode(rest[0], *address)
+    return _encode(rest[0], *address) if x.opcode in {X86Ops.CMP, X86Ops.CMPi} else _encode(x, *address, *rest)
 
   return None
 
@@ -722,7 +728,7 @@ class X86Renderer(ISARenderer):
   def spill(self, spill_slot:int, x:UOp) -> UOp:
     op = X86Ops.VMOVUPSm if rdef(x).cons[0] in XMM else X86Ops.MOVm
     disp = UOp.cconst(spill_slot, dtypes.int32)
-    return impl(UOp(Ops.NOOP), op, fold_address(stack_pointer.index(disp)) + (x,), tag=x.tag)
+    return UOp(Ops.NOOP).ins(op, *fold_address(stack_pointer.index(disp)), x, tag=x.tag)
 
   def fill(self, spill_slot:int, x:UOp, reg:Register) -> UOp:
     disp = UOp.cconst(spill_slot, dtypes.int32)
