@@ -1821,7 +1821,9 @@ class RewriteContext:
         stack.append((n, 1, new_n))
         # NOTE: CALLs are handled as a special case: their bodies are not included in the graph_rewrite,
         # rewrites that need them pass enter_calls=True
-        if new_n.op is Ops.CALL and not self.enter_calls: self.replace[new_n.body] = new_n.body
+        if new_n.op is Ops.CALL and not self.enter_calls:
+          self.replace[new_n.body] = new_n.body
+          if new_n.body in waitlist: stack.extend(waitlist.pop(new_n.body))
         for x in reversed(new_n.src):
           if x in on_stack: continue
           stack.append((x, 0, x))
