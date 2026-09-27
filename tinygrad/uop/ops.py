@@ -561,9 +561,8 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     return self.arg.opcode
   @functools.cached_property
   def impl(self) -> UOp:
-    """the pre-isel UOps this instruction computes: body with REG params resolved to operands, recursively through operand instructions"""
     assert self.is_ins, "only machine instructions carry UOp implementations"
-    # rebuild directly, substitute would traverse the whole graph upstream of the operands
+    # NOTE: substitute would traverse the whole graph upstream of the operands
     new: dict[UOp, UOp] = {}
     for n in self.body.toposort():
       if n.op is Ops.PARAM and n.addrspace is AddrSpace.REG: new[n] = s.impl if (s:=self.src[1+n.arg.slot]).is_ins else s
