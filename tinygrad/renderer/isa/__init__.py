@@ -29,7 +29,8 @@ class IselContext:
 
 def rdef(u:UOp):
   if u.op in {Ops.NOOP, Ops.AFTER, Ops.BITCAST} and u.src: return rdef(u.src[0])
-  return u.tag[0] if isinstance(u.tag, tuple) else u.tag
+  r = u.tag[0] if isinstance(u.tag, tuple) else u.tag
+  return r if isinstance(r, Register) else None
 
 # automatically implement machine instruction as minimal equivalent UOp graph pruned from upstream
 # with operands bound when possible as REG PARAMs -> arg

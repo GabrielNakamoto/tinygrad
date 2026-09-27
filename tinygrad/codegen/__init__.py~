@@ -444,7 +444,7 @@ def do_estimates(prg:UOp, sink:UOp, lin:UOp) -> UOp|None:
 
 def do_assemble(ctx:Renderer, prg:UOp, lin:UOp) -> UOp:
   if not lin.src[0].is_ins: return None
-  src = "\n".join(str(u.opcode) for u in lin.src)
+  src = "\n".join(str(u.arg[0]) for u in lin.src)
   if DEBUG >= 4: print(src)
   binary = ctx.asm(prg, lin)
   return prg.replace(src=prg.src[:2]+(UOp(Ops.SOURCE, arg=src), UOp(Ops.BINARY, arg=binary)))

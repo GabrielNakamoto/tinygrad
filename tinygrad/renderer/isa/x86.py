@@ -600,20 +600,19 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
   # get the encoding structure of the uop
   # when a uop writes to memory it takes the form of a store, dtype is void, no definition
   address:tuple[UOp|None, ...]
-  opc = x.opcode
-  if opc in X86GroupOp.WriteMem:
+  if x.opcode in X86GroupOp.WriteMem:
     if len(x.src) > 4: address, rest = x.src[1:4], x.src[4:]
     else: address, rest = (x, None, None), x.src[1:]
     imm_uop = rest[:1] if rest and rest[0].op is Ops.CAST else (None,)
     return _encode(rest[0], *address, *(None, *rest[1:])) if reg is None else _encode(None, *address, *(None, *imm_uop))
 
-  if opc in X86GroupOp.Rm1st:
+  if x.opcode in X86GroupOp.Rm1st:
     if len(x.src) > 3: address, rest = x.src[1:4], x.src[4:]
     else: address, rest = (x.src[1], None, None), x.src[2:]
     imm_uop = rest[:1] if rest and rest[0].op is Ops.CAST else (None,)
     return _encode(x, *address, *(None, *imm_uop)) if reg is None else _encode(None, *address, *(x if sel else None, *imm_uop))
 
-  if opc in X86GroupOp.Rm2nd:
+  if x.opcode in X86GroupOp.Rm2nd:
     if len(x.src) > 4: address, rest = x.src[2:5], x.src[1:2] + x.src[5:]
     else: address, rest = (x.src[2], None, None), x.src[1:2] + x.src[3:]
     # cmp reg, rm doesn't define a new register
