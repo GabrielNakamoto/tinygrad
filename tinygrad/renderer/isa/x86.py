@@ -261,8 +261,8 @@ def lea(x:UOp) -> UOp: return impl(x, X86Ops.LEA, fold_address(x))
 def is_address(x:UOp):
   if x.op in {Ops.BUFFER, Ops.ALLOC} or (x.op is Ops.PARAM and x.addrspace is AddrSpace.GLOBAL) \
     or (x.op is Ops.CALL and x.opcode in {X86Ops.LEA, X86Ops.DEFINE}): return True
-  if x.op is Ops.CALL and x.opcode is X86Ops.MOV: return (len(x.src) == 1 or x.src[0] is stack_pointer) and is_address(x.src[0])
-  return x.op is Ops.CALL and x.opcode in X86GroupOp.Copy and is_address(x.src[0])
+  if x.op is Ops.CALL and x.opcode is X86Ops.MOV: return (len(x.src) == 2 or x.src[1] is stack_pointer) and is_address(x.src[1])
+  return x.op is Ops.CALL and x.opcode in X86GroupOp.Copy and is_address(x.src[1])
 
 def abi(ctx:IselContext, x:UOp) -> UOp|None:
   if isinstance(x.tag, tuple): return None
@@ -502,7 +502,7 @@ def lower_loop(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   return (jmp.src[0], [jmp.src[0], jmp.replace(tag=x.src[3].tag)])
 
 def alloc_stack(ctx:X86LinearContext, x:UOp):
-  if not ctx.stack_size or ctx.stack_allocated or x.arg[0] is not X86Ops.DEFINE: return None
+  if not ctx.stack_size or ctx.stack_allocated or x.opcode is not X86Ops.DEFINE: return None
   ctx.stack_allocated = True
   return x, [impl(UOp(Ops.NOOP), X86Ops.SUBi, (imm(dtypes.int32, ctx.stack_size),), tag=stack_pointer.tag), x]
 
@@ -513,7 +513,7 @@ post_regalloc_matcher = PatternMatcher([
   (UPat(Ops.CALL, name="x"), lambda ctx,x: (x, [impl(UOp(Ops.NOOP), X86Ops.ADDi, (imm(dtypes.int32, ctx.stack_size),), tag=stack_pointer.tag), x])
     if ctx.stack_size and x.opcode is X86Ops.RET else None),
   # rewrite FRAME_INDEX to IMM now that the stack size is known
-  (UPat(Ops.CALL, src=(UPat.cvar("disp").cast(),), name="x"), lambda ctx,disp,x:
+  (UPat(Ops.CALL, src=(UPat(), UPat.cvar("disp").cast(),), name="x"), lambda ctx,disp,x:
     (nx:=UOp.cconst(ctx.stack_size + disp.val, x.dtype), [nx]) if x.opcode is X86Ops.FRAME_INDEX else None),
   # expand the cmp here so we can preserve rng src edge to get label from ctx
   (UPat(Ops.CALL, name="x"), lambda ctx,x: lower_loop(ctx, x) if x.opcode is X86Ops.LOOP_CMP else None),
@@ -522,8 +522,8 @@ post_regalloc_matcher = PatternMatcher([
   # rewrite END to ACC + 1 -> JUMP -> LABEL, also add the out of loop JUMP to the src so this becomes the jump target
   (UPat(Ops.END, name="x"), lower_end),
   # rewrite two address instructions to two address form, if reused src wasn't coalesced insert a move
-  (UPat(Ops.CALL, name="x"), lambda ctx,x: (nx:=x.replace(src=x.src[1:]),
-   [ctx.ren.copy(x.src[0], rdef(x)), nx] if rdef(x) != rdef(x.src[0]) else [nx]) if x.opcode in X86GroupOp.TwoAddress else None),
+  (UPat(Ops.CALL, name="x"), lambda ctx,x: (nx:=x.replace(src=(x.body,*x.src[2:])),
+   [ctx.ren.copy(x.src[1], rdef(x)), nx] if rdef(x) != rdef(x.src[1]) else [nx]) if x.opcode in X86GroupOp.TwoAddress else None),
 ])
 
 # ***** X86 instruction encoding *****
@@ -558,7 +558,7 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
       # bit signaling 64 bit variant of instruction
       w = sz == 8
       # legacy 8bit opcode is 1 less than 16-64bit variants
-      demote = (rm_sz == 1 or reg_sz == 1) and x.arg[0] not in X86GroupOp.ReadFlags | {X86Ops.LEA}
+      demote = (rm_sz == 1 or reg_sz == 1) and x.opcode not in X86GroupOp.ReadFlags | {X86Ops.LEA}
       # REX byte is required when 64 bit or an extended reg is used (index 8 - 15) or lower 8 bits of (rsp, rbp, rsi, rdi) are accessed
       if w | r | _x | b | (reg_sz == 1 & reg >> 2) | (rm_sz == 1 & rm >> 2) | (demote and disp_uop is None and rm >= 4):
         inst += bytes([0b0100 << 4 | w << 3 | r << 2 | _x << 1 | b])
@@ -602,20 +602,20 @@ def encode(x:UOp, opc:int, reg:int|None=None, pp:int=0, sel:int=0, we:int=0) -> 
   address:tuple[UOp|None, ...]
   opc = x.opcode
   if opc in X86GroupOp.WriteMem:
-    if len(x.src) > 3: address, rest = x.src[:3], x.src[3:]
-    else: address, rest = (x, None, None), x.src
+    if len(x.src) > 4: address, rest = x.src[1:4], x.src[4:]
+    else: address, rest = (x, None, None), x.src[1:]
     imm_uop = rest[:1] if rest and rest[0].op is Ops.CAST else (None,)
     return _encode(rest[0], *address, *(None, *rest[1:])) if reg is None else _encode(None, *address, *(None, *imm_uop))
 
   if opc in X86GroupOp.Rm1st:
-    if len(x.src) > 2: address, rest = x.src[:3], x.src[3:]
-    else: address, rest = (x.src[0], None, None), x.src[1:]
+    if len(x.src) > 3: address, rest = x.src[1:4], x.src[4:]
+    else: address, rest = (x.src[1], None, None), x.src[2:]
     imm_uop = rest[:1] if rest and rest[0].op is Ops.CAST else (None,)
     return _encode(x, *address, *(None, *imm_uop)) if reg is None else _encode(None, *address, *(x if sel else None, *imm_uop))
 
   if opc in X86GroupOp.Rm2nd:
-    if len(x.src) > 3: address, rest = x.src[1:4], x.src[:1] + x.src[4:]
-    else: address, rest = (x.src[1], None, None), x.src[:1] + x.src[2:]
+    if len(x.src) > 4: address, rest = x.src[2:5], x.src[1:2] + x.src[5:]
+    else: address, rest = (x.src[2], None, None), x.src[1:2] + x.src[3:]
     # cmp reg, rm doesn't define a new register
     return _encode(x, *address, *rest) if x.dtype is not dtypes.void else _encode(rest[0], *address)
 
@@ -730,7 +730,7 @@ class X86Renderer(ISARenderer):
     return impl(x, X86Ops.VMOVUPS if reg.cons[0] in XMM else X86Ops.MOV, fold_address(stack_pointer.index(disp)), tag=(reg,))
 
   def asm_str(self, uops:list[UOp], function_name:str) -> str:
-    def _format_op(x:UOp) -> str: return f"    {(o[7:-1] if (o:=str(x.arg[0]))[-1] in ('i', 'm') else o[7:]).lower():7s}"
+    def _format_op(x:UOp) -> str: return f"    {(o[7:-1] if (o:=str(x.opcode))[-1] in ('i', 'm') else o[7:]).lower():7s}"
     def _format_operands(x:UOp) -> str:
       def _format(src:tuple[UOp, ...]) -> list[str]:
         return [str(s.src[0].val) if s.op is Ops.CAST else reg_strs[o].get(rdef(s).size, o) if \
@@ -738,9 +738,9 @@ class X86Renderer(ISARenderer):
       def _mem_adress(base:UOp, idx:UOp, disp:UOp) -> list[str]:
         return [f"[{rdef(base)}" + (f" + {rdef(idx)}*{base.dtype.itemsize}" if rdef(idx) else "") + (f" + {d}" if (d:=disp.src[0].val) else "") + "]"]
 
-      if len(x.src) > 3 and x.opcode in X86GroupOp.WriteMem: ret = _mem_adress(*x.src[:3]) + _format(x.src[3:])
-      elif len(x.src) > 2 and x.opcode in X86GroupOp.Rm1st: ret = _format((x,)) + _mem_adress(*x.src[:3]) + _format(x.src[3:])
-      elif len(x.src) > 3 and x.opcode in X86GroupOp.Rm2nd: ret = _format((x, x.src[0])) + _mem_adress(*x.src[1:4]) + _format(x.src[4:])
+      if len(x.src) > 4 and x.opcode in X86GroupOp.WriteMem: ret = _mem_adress(*x.src[1:4]) + _format(x.src[4:])
+      elif len(x.src) > 3 and x.opcode in X86GroupOp.Rm1st: ret = _format((x,)) + _mem_adress(*x.src[1:4]) + _format(x.src[4:])
+      elif len(x.src) > 4 and x.opcode in X86GroupOp.Rm2nd: ret = _format((x, x.src[1])) + _mem_adress(*x.src[2:5]) + _format(x.src[5:])
       else: ret = _format((x,) + x.src)
       return ", ".join(ret)
 

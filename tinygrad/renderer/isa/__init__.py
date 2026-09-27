@@ -45,7 +45,7 @@ def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
   new: dict[UOp, UOp] = {}
   for n in u.toposort(gate=lambda n: n not in cut):
     new[n] = n.replace(src=tuple(new[s] if s in new else cut[s] for s in n.src)) if n.src else n
-  return (cut[u] if u in cut else new[u]).ins(opc, *oprs, **kwargs)
+  return (cut[u] if u in cut else new[u]).rtag().ins(opc, *oprs, **kwargs)
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):
