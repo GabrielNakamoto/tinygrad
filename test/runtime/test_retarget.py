@@ -88,18 +88,10 @@ class TestRetarget(unittest.TestCase):
     Tensor.realize(*[p.replace(Tensor.ones_like(p).contiguous()) for p in nn.state.get_parameters(layers)])
     self._helper_test_cross((Tensor.rand(1, 1, 28, 28),), lambda x: x.sequential(layers))
 
-  """
-  def test_transfer_loop(self):
-    from test.backend.test_wait_loop import wait_loop_kernel
-    def mk(): return Tensor.custom_kernel(Tensor.empty(1, dtype=dtypes.int), fxn=wait_loop_kernel)[0]
-    ref, out = mk(), mk()
-    GlobalCounters.reset()
-    truth = ref.item()
-    native = GlobalCounters.kernel_count
-    cross = _cross_exec(out)
-    self.assertEqual(native, cross)
-    self.assertEqual(truth, out.item())
-  """
+  def test_transfer_conv2d_backward(self):
+    bs,cin,cout,H,W,groups = 1,1,6,2,3,1
+    self._helper_test_cross((Tensor.rand(bs,cin,5,7), Tensor.rand(cout,cin//groups,H,W)), lambda x,w: Tensor.conv2d(x,w,groups=groups).sum().backward())
+
 
 if __name__ == '__main__':
   np.random.seed(2973)

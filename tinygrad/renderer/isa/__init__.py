@@ -42,8 +42,10 @@ def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
   if u in oprs: return bind(oprs.index(u)).rtag().ins(opc, *oprs, **kwargs)
   cut: dict[UOp, UOp] = {}
   for i,o in enumerate(oprs):
-    if o.dtype is not dtypes.void: cut.setdefault(o.impl if o.is_ins else o, bind(i))
-  # stop traversing at operands, the body is only the cone between u and the cut
+    if o.dtype is dtypes.void: continue
+    cut.setdefault(o.impl if o.is_ins else o, bind(i))
+    if o.is_ins: cut.setdefault(o, bind(i))
+  # prune leafs at operands, rest of graph not necessary for equivalent semantics
   new: dict[UOp, UOp] = {}
   for n in u.toposort(gate=lambda n: n not in cut):
     new[n] = n.replace(src=tuple(new[s] if s in new else cut[s] for s in n.src)) if n.src else n
