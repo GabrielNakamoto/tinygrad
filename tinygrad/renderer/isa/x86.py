@@ -210,20 +210,20 @@ def mask(x:UOp) -> UOp:
 def vinsertps(x:UOp) -> UOp:
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
-    lanes = [ret.index(imm(dtypes.uint16,j)) for j in range(len(x.src))]
+    lanes = [ret.index(imm(dtypes.uint16,j)) if j < i else imm(x.dtype,0.0) for j in range(len(x.src))]
     lanes[i] = s.index(imm(dtypes.uint16,v))
-    return UOp(Ops.STACK, src=tuple(lanes)).ins(X86Ops.VINSERTPS, ret, s, imm(dtypes.uint8, v << 6 | i << 4))
-  return functools.reduce(_insert, range(len(x.src)), UOp(Ops.STACK, src=tuple(imm(x.dtype, 0.0) for _ in range(len(x.src)))))
+    return impl(UOp(Ops.STACK, src=tuple(lanes)), X86Ops.VINSERTPS, (ret, s, imm(dtypes.uint8, v << 6 | i << 4)))
+  return functools.reduce(_insert, range(len(x.src)), undef())
 
 # vpinsrd xmm2, xmm0, eax, imm
 # inserts the element in eax into any position in xmm0, result is written to xmm2 according to imm
 def vpins(x:UOp, srcs:tuple[UOp, ...]) -> UOp:
   op = {2: X86Ops.VPINSRW, 4: X86Ops.VPINSRD}[x.dtype.itemsize]
   def _pin(ret:UOp, i:int) -> UOp:
-    lanes = [ret.index(imm(dtypes.uint16,j)) for j in range(len(srcs))]
+    lanes = [ret.index(imm(dtypes.uint16,j)) if j < i else imm(x.dtype,0) for j in range(len(srcs))]
     lanes[i] = srcs[i]
-    return UOp(Ops.STACK, src=tuple(lanes)).ins(op, ret, srcs[i], imm(dtypes.uint8, i))
-  return functools.reduce(_pin, range(len(srcs)), UOp(Ops.STACK, src=tuple(imm(x.dtype, 0) for _ in range(len(srcs)))))
+    return impl(UOp(Ops.STACK, src=tuple(lanes)), op, (ret, srcs[i], imm(dtypes.uint8, i)))
+  return functools.reduce(_pin, range(len(srcs)), undef())
 
 # we don't call ctx.vreg on the srcs to avoid duplicates, a rewrite will assign the tuple of valid registers to a vreg
 def idiv(ctx:IselContext, x:UOp) -> UOp:
@@ -490,9 +490,10 @@ def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   # loop, cmp on backedge all we need is a jmp tag
   if x.dtype is dtypes.void: return (label, [label])
   else:
-    acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),) + x.src[1:], tag=x.tag)
-    cmp = impl(UOp(Ops.NOOP), X86Ops.CMPi if x.src[0].op is Ops.CAST else X86Ops.CMP, (acc, x.src[0]))
-    jump_out = impl(UOp(Ops.NOOP), X86Ops.JGE, (cmp,), tag=f".LOOP_OUT_{loop_label}")
+    acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),), tag=x.tag)
+    # acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),) + x.src[1:], tag=x.tag)
+    cmp = UOp(Ops.NOOP).ins(X86Ops.CMPi if x.src[0].op is Ops.CAST else X86Ops.CMP, acc, x.src[0])
+    jump_out = UOp(Ops.NOOP).ins(X86Ops.JGE, cmp, tag=f".LOOP_OUT_{loop_label}")
     ctx.loop_label[acc] = loop_label
     return (acc, [acc, label, cmp, jump_out])
 
@@ -647,8 +648,8 @@ encodings = {
   X86Ops.VCVTSS2SD: lambda x: encode(x, 0x5A, pp=2, sel=1), X86Ops.VCVTSD2SS: lambda x: encode(x, 0x5A, pp=3, sel=1),
   X86Ops.VCVTPH2PS: lambda x: encode(x, 0x13, pp=1, sel=2), X86Ops.VCVTPS2PH: lambda x: encode(x, 0x1D, pp=1, sel=3),
   # the int src is the 2nd src (the rm field), its width picks the 32 or 64 bit form
-  X86Ops.VCVTSI2SS: lambda x: encode(x, 0x2A, pp=2, sel=1, we=x.src[1].dtype.itemsize == 8),
-  X86Ops.VCVTSI2SD: lambda x: encode(x, 0x2A, pp=3, sel=1, we=x.src[1].dtype.itemsize == 8),
+  X86Ops.VCVTSI2SS: lambda x: encode(x, 0x2A, pp=2, sel=1, we=x.src[2].dtype.itemsize == 8),
+  X86Ops.VCVTSI2SD: lambda x: encode(x, 0x2A, pp=3, sel=1, we=x.src[2].dtype.itemsize == 8),
   X86Ops.VCVTTSS2SI: lambda x: encode(x, 0x2C, pp=2, sel=1, we=x.dtype.itemsize == 8),
   X86Ops.VCVTTSD2SI: lambda x: encode(x, 0x2C, pp=3, sel=1, we=x.dtype.itemsize == 8),
   # int division

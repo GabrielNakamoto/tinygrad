@@ -565,7 +565,9 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     # NOTE: substitute would traverse the whole graph upstream of the operands
     new: dict[UOp, UOp] = {}
     for n in self.body.toposort():
-      if n.op is Ops.PARAM and n.addrspace is AddrSpace.REG: new[n] = s.impl if (s:=self.src[1+n.arg.slot]).is_ins else s
+      if n.op is Ops.PARAM and n.addrspace is AddrSpace.REG:
+        assert 1+n.arg.slot < len(self.src), f"operand binding out of bounds, {1+n.arg.slot} >= {len(self.src)} for {self.opcode}"
+        new[n] = s.impl if (s:=self.src[1+n.arg.slot]).is_ins else s
       else: new[n] = n.replace(src=tuple(new[x] for x in n.src)) if n.src else n
     return new[self.body]
   @property

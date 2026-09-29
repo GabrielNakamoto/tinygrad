@@ -39,12 +39,10 @@ def rdef(u:UOp):
 def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
   def bind(i:int) -> UOp: return (p := oprs[i].param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
   # operands are keyed by the pre-isel value they compute, the first slot wins for repeated operands
+  if u in oprs: return bind(oprs.index(u)).rtag().ins(opc, *oprs, **kwargs)
   cut: dict[UOp, UOp] = {}
   for i,o in enumerate(oprs):
-    if o.dtype is not dtypes.void:
-      if o.is_ins:
-        print(o.op, o.arg, len(o.src))
-      cut.setdefault(o.impl if o.is_ins else o, bind(i))
+    if o.dtype is not dtypes.void: cut.setdefault(o.impl if o.is_ins else o, bind(i))
   # stop traversing at operands, the body is only the cone between u and the cut
   new: dict[UOp, UOp] = {}
   for n in u.toposort(gate=lambda n: n not in cut):
