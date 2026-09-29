@@ -211,7 +211,8 @@ def vinsertps(x:UOp) -> UOp:
   def _insert(ret:UOp, i:int) -> UOp:
     s, v = base(x, i), lane(x, i)
     lanes = [ret.index(imm(dtypes.uint16,j)) if j < i else imm(x.dtype,0.0) for j in range(len(x.src))]
-    lanes[i] = s.index(imm(dtypes.uint16,v))
+    lanes[i] = s
+    # lanes[i] = s.index(imm(dtypes.uint16,v))
     return impl(UOp(Ops.STACK, src=tuple(lanes)), X86Ops.VINSERTPS, (ret, s, imm(dtypes.uint8, v << 6 | i << 4)))
   return functools.reduce(_insert, range(len(x.src)), undef())
 
@@ -220,9 +221,9 @@ def vinsertps(x:UOp) -> UOp:
 def vpins(x:UOp, srcs:tuple[UOp, ...]) -> UOp:
   op = {2: X86Ops.VPINSRW, 4: X86Ops.VPINSRD}[x.dtype.itemsize]
   def _pin(ret:UOp, i:int) -> UOp:
-    lanes = [ret.index(imm(dtypes.uint16,j)) if j < i else imm(x.dtype,0) for j in range(len(srcs))]
+    lanes = [ret.index(imm(dtypes.uint16,j)).bitcast(srcs[0].dtype) if j < i else imm(srcs[0].dtype,0) for j in range(len(srcs))]
     lanes[i] = srcs[i]
-    return impl(UOp(Ops.STACK, src=tuple(lanes)), op, (ret, srcs[i], imm(dtypes.uint8, i)))
+    return impl(UOp(Ops.STACK, src=tuple(lanes)).bitcast(x.dtype), op, (ret, srcs[i], imm(dtypes.uint8, i)))
   return functools.reduce(_pin, range(len(srcs)), undef())
 
 # we don't call ctx.vreg on the srcs to avoid duplicates, a rewrite will assign the tuple of valid registers to a vreg
@@ -329,7 +330,7 @@ isel_matcher = PatternMatcher([
   # add callee saved registers to the RET, these will be scheduled at the top of the kernel and will be saved/restored if they are used in regalloc
   # so regalloc builds the prologue/epilogue naturally
   (UPat(Ops.SINK, name="x"), lambda x:
-   x.replace(src=(impl(UOp(Ops.NOOP), X86Ops.RET, x.src + (stack_pointer,) + tuple(def_reg(r) for r in CALLEE_SAVED)),))
+   x.replace(src=(UOp(Ops.NOOP).ins(X86Ops.RET, *x.src, stack_pointer, *tuple(def_reg(r) for r in CALLEE_SAVED)),*x.src))
     if not x.src or x.src[0].op is not Ops.CALL or x.src[0].opcode is not X86Ops.RET else None),
   # function abi constraints
   (UPat((Ops.PARAM, Ops.SPECIAL), name="x"), abi),
