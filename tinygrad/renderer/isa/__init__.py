@@ -1,6 +1,7 @@
 from __future__ import annotations
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from tinygrad.dtype import AddrSpace
 from tinygrad.renderer import Renderer
 from tinygrad.uop.ops import PatternMatcher, UOp, Ops
 from typing import Any
@@ -29,6 +30,9 @@ class IselContext:
 def rdef(u:UOp):
   if u.op in {Ops.NOOP, Ops.AFTER, Ops.BITCAST} and u.src: return rdef(u.src[0])
   return u.tag[0] if isinstance(u.tag, tuple) else u.tag
+
+def bind(u:UOp, i:int) -> UOp:
+  return (p := u.param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):

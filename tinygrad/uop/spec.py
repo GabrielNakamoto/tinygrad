@@ -1,6 +1,6 @@
 import math, functools
 from typing import Any
-from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, AxisType, KernelInfo, ParamArg, CallInfo, OPAQUE_CALL_BODIES, \
+from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, AxisType, KernelInfo, ParamArg, CallInfo, InstInfo, OPAQUE_CALL_BODIES, \
   CustomFunction
 from tinygrad.uop.render import print_uops, pyrender
 from tinygrad.dtype import DType, dtypes, AddrSpace, Invalid, ConstFloat
@@ -100,7 +100,7 @@ spec_shared = PatternMatcher([
 
   # AFTER on Movement Op, PARAM, BUFFER, ALLOC, STAGE, or another AFTER
   (UPat(Ops.AFTER, src=(UPat(GroupOp.Movement.union({Ops.PARAM, Ops.BUFFER, Ops.ALLOC, Ops.STAGE, Ops.INDEX,
-                                                     Ops.AFTER, Ops.UNSHARD, Ops.BITCAST, Ops.INS})),),
+                                                     Ops.AFTER, Ops.UNSHARD, Ops.BITCAST})),),
         allow_any_len=True), lambda: True),
 
   # CUSTOM (inline and non inline): the arg is the source string and the dtype it produces, void for a bare statement
@@ -109,17 +109,15 @@ spec_shared = PatternMatcher([
 
   # a CUSTOM_FUNCTION names an external function: the arg is a CustomFunction stating the return dtype
   (UPat(Ops.CUSTOM_FUNCTION, name="x", allow_any_len=True), lambda x: isinstance(x.arg, CustomFunction)),
-  # CALL: the body is always an opaque body stating the dtype, the arg is a CallInfo
-  (UPat(Ops.CALL, src=(UPat(tuple(OPAQUE_CALL_BODIES)),), allow_any_len=True, name="x"), lambda x: isinstance(x.arg, CallInfo)),
+  # CALL: the body is always an opaque body, a machine instruction (InstInfo) implements src[0]
+  (UPat(Ops.CALL, name="x"), lambda x: isinstance(x.arg, InstInfo) or (isinstance(x.arg, CallInfo)
+    and x.src[0].op in OPAQUE_CALL_BODIES)),
 
   # pattern compiler IR ops (not in tensor/program graphs, but spec-compliant)
   (UPat(Ops.PYLITERAL), lambda: True),
 
   # BARRIER (on any length). TODO: this should only be in spec_program
   (UPat(Ops.BARRIER, dtypes.void), lambda: True),
-
-  # assembly instruction
-  (UPat(Ops.INS, name="x"), lambda x: isinstance(x.arg, tuple) and len(x.arg) == 2 and isinstance(x.arg[1], DType)),
 
   # LOAD(idx) / STORE(idx, val) with gates on the LOAD/STORE
   (UPat((Ops.INDEX, Ops.SHRINK), name="uidx").or_casted().load(), validate_index),

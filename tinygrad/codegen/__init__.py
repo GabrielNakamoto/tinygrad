@@ -437,7 +437,7 @@ def do_linearize(ctx:Renderer, prg:UOp, sink:UOp) -> UOp:
     lin_ctx = ctx.linear_ctx_type(ctx)
     lst = line_rewrite(lst, ctx.pre_regalloc_matcher, lin_ctx)
     # register definitions (INS without srcs) move to the top so regalloc sees their live ranges span the whole program (callee saved regs)
-    lst = sorted(lst, key=lambda u: u.op is not Ops.INS or bool(u.src))
+    lst = sorted(lst, key=lambda u: not u.is_ins or bool(u.src[1:]))
     regalloc_ctx = LinearScanRegallocContext(lin_ctx, lst, ctx)
     lst = line_rewrite(lst, pm_regalloc_rewrite, regalloc_ctx)
     lst = line_rewrite(lst, ctx.post_regalloc_matcher, lin_ctx)
@@ -449,7 +449,8 @@ def do_estimates(prg:UOp, sink:UOp, lin:UOp) -> UOp|None:
   return prg.replace(src=(sink.replace(arg=replace(sink.arg, estimates=Estimates.from_uops(lin.src, ignore_indexing=True))),)+prg.src[1:])
 
 def do_assemble(ctx:Renderer, prg:UOp, lin:UOp) -> UOp:
-  src = "\n".join(str(u.arg[0]) for u in lin.src)
+  if not lin.src[0].is_ins: return None
+  src = "\n".join(str(u.opcode) for u in lin.src)
   if DEBUG >= 4: print(src)
   binary = ctx.asm(prg, lin)
   return prg.replace(src=prg.src[:2]+(UOp(Ops.SOURCE, arg=src), UOp(Ops.BINARY, arg=binary)))
@@ -467,7 +468,7 @@ def do_compile(ctx:Renderer, prg:UOp, source:UOp) -> UOp|None:
 pm_to_program = PatternMatcher([
   (UPat(Ops.PROGRAM, src=(UPat(Ops.SINK, name="sink"),), name="prg"), do_linearize),
   (UPat(Ops.PROGRAM, src=(UPat(Ops.SINK, name="sink"), UPat(Ops.LINEAR, name="lin")), name="prg"), do_estimates),
-  (UPat(Ops.PROGRAM, src=(UPat(), UPat(Ops.LINEAR, src=UPat(Ops.INS), name="lin")), name="prg"), do_assemble),
+  (UPat(Ops.PROGRAM, src=(UPat(), UPat(Ops.LINEAR, src=UPat(Ops.CALL), name="lin")), name="prg"), do_assemble),
   (UPat(Ops.PROGRAM, src=(UPat(), UPat(Ops.LINEAR, name="lin")), name="prg"), do_render),
   (UPat(Ops.PROGRAM, src=(UPat(), UPat(Ops.LINEAR), UPat(Ops.SOURCE, name="source")), name="prg"), do_compile),
 ])

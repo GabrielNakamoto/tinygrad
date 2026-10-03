@@ -128,17 +128,13 @@ def dtype_from_uop(op:Ops, src:tuple[UOp,...], arg:Any) -> DType:
       # always void
       return dtypes.void
     case Ops.CALL:
-      # a call has the dtype of its body, void for opaque bodies
+      # a call has the dtype of its body, void for opaque bodies; a machine instruction derives it from its implementation
       return src[0].dtype
     case Ops.CUSTOM_FUNCTION:
       # an external function states its return dtype in the arg
       return arg.dtype
     case Ops.CUSTOM | Ops.CUSTOMI:
       assert isinstance(arg, tuple) and len(arg) == 2 and isinstance(arg[1], DType), f"CUSTOM/CUSTOMI arg must be (str, DType), got {arg}"
-      return arg[1]
-    case Ops.INS:
-      # arg is (instruction, dtype), a queue command or an asm line is void
-      assert isinstance(arg, tuple) and len(arg) == 2 and isinstance(arg[1], DType), f"INS arg must be (instruction, DType), got {arg}"
       return arg[1]
     case Ops.INDEX:
       # an image access is always float, no matter the storage dtype
@@ -335,10 +331,9 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
            Ops.LINEAR | Ops.PROGRAM | Ops.SOURCE:
         return None
 
-      # INS shape is always scalar, vector width is in the instruction encoding
-      case Ops.INS:
-        if self.dtype is dtypes.void: return None
-        return ()
+      # a void CALL has no shape, the return value of a CALL has the shape of its dtype
+      case Ops.CALL:
+        return None if self.dtype is dtypes.void else ()
 
       # special (terrible) case for RESHAPE on NOOP
       case Ops.RESHAPE:
@@ -384,7 +379,7 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
 
       # passthrough ops
       case Ops.MSTACK | Ops.MSELECT | Ops.DETACH | Ops.CONTIGUOUS_BACKWARD | Ops.AFTER | Ops.LOAD | \
-           Ops.COPY | Ops.ALLREDUCE | Ops.STORE | Ops.END | Ops.CALL:
+           Ops.COPY | Ops.ALLREDUCE | Ops.STORE | Ops.END:
         return self.src[0]._shape
 
       case Ops.BITCAST:
@@ -466,7 +461,7 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
 
   @functools.cached_property
   def ended_ranges(self) -> tuple[UOp, ...]:
-    if self.op is Ops.CALL and self.body.op is Ops.CUSTOM_FUNCTION: return ()
+    if self.op is Ops.CALL and (self.body.op is Ops.CUSTOM_FUNCTION or isinstance(self.arg, InstInfo)): return ()
     if self.op is Ops.END: return tuple(r for r in self.src[1:] if r.op is Ops.RANGE)
     if self.op is Ops.BACKEDGE: return self.src[1:2]  # the condition's other ranges remain live
     if self.op in range_start: return self.src[range_start[self.op]:]
@@ -559,13 +554,20 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     if len(srcs) == 1 and isinstance(srcs[0], UOp): return srcs[0]
     return UOp(Ops.GROUP, src=tuple([x for x in srcs if x is not None]), **kwargs)
   @property
+  def is_ins(self) -> bool: return self.op is Ops.CALL and isinstance(self.arg, InstInfo)
+  @property
+  def opcode(self) -> Any:
+    assert self.is_ins, "opcode is only valid for machine instruction calls"
+    return self.arg.opcode
+  @property
   def body(self) -> UOp:
     """the body of a CALL: the program, copy or function reference being called (its first src)"""
     if self.op is not Ops.CALL: raise RuntimeError(f"body requested, but {self.op} is not a CALL")
     return self.src[0]
   @property
   def is_inline_call(self) -> bool:
-    return self.op is Ops.CALL and self.body.op is Ops.SINK and self.body.arg is None and not self.arg.precompile
+    return self.op is Ops.CALL and (isinstance(self.arg, InstInfo) or \
+      (self.body.op is Ops.SINK and self.body.arg is None and not self.arg.precompile))
   @property
   def has_unbound_outputs(self) -> bool:
     """does this call still have unresolved outputs: ALLOCs among its inputs (minted by call_with_outputs,
@@ -619,7 +621,7 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   @property
   def without_after(self) -> UOp: return self.src[0].without_after if self.op is Ops.AFTER else self
   def barrier(self, *src:UOp): return UOp(Ops.BARRIER, src=(self,)+src)
-  def ins(self, arg, **kwargs): return UOp(Ops.INS, kwargs.pop("src", self.src), (arg, kwargs.pop("dtype", self.dtype)), kwargs.pop("tag", self.tag))
+  def ins(self, opc:Any, *src, **kwargs): return UOp(Ops.CALL, (self,)+src, InstInfo(opc), kwargs.pop("tag", None))
   def contract(self, *rngs:UOp):
     assert all(x.axis_type == AxisType.UPCAST for x in rngs), "all contract ranges must be upcast"
     return UOp.stack(*[self.substitute(dict(zip(rngs, [r.const_like(i) for r,i in zip(rngs, idx)])))
@@ -1408,6 +1410,10 @@ class CallInfo:
   def __repr__(self):
     gf = id(self.grad_fxn) if self.grad_fxn else None
     return f"CallInfo({gf}, {repr(self.name)}, {self.precompile}, {self.precompile_backward})"
+
+@dataclass(frozen=True)
+class InstInfo:
+  opcode: Any
 
 # ******** ops in python ********
 

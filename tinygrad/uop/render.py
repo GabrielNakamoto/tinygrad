@@ -1,6 +1,6 @@
 from tinygrad.dtype import dtypes
 from tinygrad.uop import Ops, GroupOp
-from tinygrad.uop.ops import ParamArg, UOp, PatternMatcher, UPat, multirange_str, range_str, consumer_map_from_toposort, sint
+from tinygrad.uop.ops import ParamArg, UOp, PatternMatcher, UPat, InstInfo, multirange_str, range_str, consumer_map_from_toposort, sint
 from tinygrad.helpers import strip_parens
 
 def pretty_print(x:UOp, cache=None, d=0)->str:
@@ -151,7 +151,7 @@ def pyrender(ast:UOp) -> str:
     if u.op is Ops.STORE: to_render.add(u.src[1])
     if u.op is Ops.REDUCE: to_render.add(u.src[0])
     # a call on a program, or with a grad_fxn or an aux, can't be reconstructed from code
-    if u.op is Ops.CALL and (u.body.op is Ops.PROGRAM or u.arg.grad_fxn is not None or u.arg.aux is not None):
+    if u.op is Ops.CALL and (isinstance(u.arg, InstInfo) or u.body.op is Ops.PROGRAM or u.arg.grad_fxn is not None or u.arg.aux is not None):
       raise NotImplementedError("call can't be pyrendered")
     # a BUFFER carrying a device Buffer can't be pyrendered: the Buffer object can't be reconstructed from code
     if u.op is Ops.BUFFER and isinstance(u.arg, ParamArg) and u.arg.buffer is not None: raise NotImplementedError("buffer can't be pyrendered")
