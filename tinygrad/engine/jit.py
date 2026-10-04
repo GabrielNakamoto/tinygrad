@@ -63,15 +63,20 @@ class CapturedJit(Generic[ReturnType]):
   def _written_uops(self) -> set[UOp]:
     return {b for call in self.linear.toposort() if call.op is Ops.CALL and isinstance(call.arg, CallInfo) for b in get_call_written_bufs(call)}
 
+  @functools.cached_property
+  def _symbolic_ret(self) -> list[tuple[Tensor, UOp, dict[Variable, int]]]:
+    return [(t, *ub) for t in get_parameters(self.ret) if (ub:=t.uop.unbind_all())[1]]
+
   def __call__(self, input_uops:list[UOp], var_vals:dict[str, int]) -> ReturnType:
     concrete = tuple(_copy_input(u) if u in self._written_uops else u for u in input_uops)
     if DEBUG >= 1 and len(self.linear.src) >= 10: print(f"jit execs {len(self.linear.src)} calls")
     run_linear(self.linear, var_vals, input_uops=concrete, jit=True)
+    for t,u,vals in self._symbolic_ret: t.uop = u.substitute({v:v.bind(var_vals.get(v.expr, i)) for v,i in vals.items()}, walk=True)
     return self.ret
 
   def free_intermediates(self):
     for u in self._written_uops:
-      if u.op is not Ops.BUFFER or (buf:=u.arg.buffer) is None: continue
+      if (buf:=u.arg.buffer) is None: continue
       for b in (buf.bufs if isinstance(buf, MultiBuffer) else (buf,)):
         if b.is_allocated(): b.deallocate()
         if (base:=b._base) is not None and base.allocated_views == 0 and base.is_allocated(): base.deallocate()
@@ -104,7 +109,7 @@ class _TinyJit(Generic[ReturnType]):
     self.cnt: int = 2 if self.fxn is None else 0
     self.prune = prune
 
-  def add_linear(self, linear:UOp, var_vals:dict[str, int]): self._linears.append(linear)
+  def add_linear(self, linear:UOp): self._linears.append(linear)
 
   def reset(self):
     assert self.fxn is not None, "can't reset without function"
