@@ -1,13 +1,8 @@
 import math, functools
 from typing import Any
-<<<<<<< HEAD
-from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, AxisType, KernelInfo, ParamArg, CallInfo, InstInfo, OPAQUE_CALL_BODIES
-from tinygrad.uop.render import print_uops, pyrender
-=======
-from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, AxisType, KernelInfo, ParamArg, CallInfo, OPAQUE_CALL_BODIES, \
+from tinygrad.uop.ops import PatternMatcher, UPat, GroupOp, Ops, UOp, AxisType, KernelInfo, ParamArg, CallInfo, InstInfo, OPAQUE_CALL_BODIES, \
   CustomFunction
 from tinygrad.uop.render import render_ssa, pyrender
->>>>>>> 885ab362a70dd2238d7db2a45d4b4383c4b758b6
 from tinygrad.dtype import DType, dtypes, AddrSpace, Invalid, ConstFloat
 from tinygrad.helpers import DEBUG, Context, SPEC, Metadata, panic, CHECK_OOB, all_same, is_image_shape
 from tinygrad.device import is_disk_device
@@ -112,18 +107,11 @@ spec_shared = PatternMatcher([
   (UPat((Ops.CUSTOMI, Ops.CUSTOM), name="x"),
    lambda x: isinstance(x.arg, tuple) and len(x.arg) == 2 and isinstance(x.arg[0], str) and isinstance(x.arg[1], DType)),
 
-<<<<<<< HEAD
-  # a CUSTOM_FUNCTION with srcs is the body of an external call, holding the callee (a function pointer)
-  (UPat(Ops.CUSTOM_FUNCTION, name="x", allow_any_len=True), lambda x: isinstance(x.arg, str)),
-  # CALL: a CallInfo call has an opaque body and states its (possibly void) dtype, a machine instruction (InstInfo) implements src[0]
-  (UPat(Ops.CALL, name="x"), lambda x: isinstance(x.arg, InstInfo) or (isinstance(x.arg, CallInfo) and x.dtype is x.arg.dtype
-    and x.src[0].op in OPAQUE_CALL_BODIES)),
-=======
   # a CUSTOM_FUNCTION names an external function: the arg is a CustomFunction stating the return dtype
   (UPat(Ops.CUSTOM_FUNCTION, name="x", allow_any_len=True), lambda x: isinstance(x.arg, CustomFunction)),
   # CALL: the body is always an opaque body stating the dtype, the arg is a CallInfo
-  (UPat(Ops.CALL, src=(UPat(tuple(OPAQUE_CALL_BODIES)),), allow_any_len=True, name="x"), lambda x: isinstance(x.arg, CallInfo)),
->>>>>>> 885ab362a70dd2238d7db2a45d4b4383c4b758b6
+  (UPat(Ops.CALL, src=(UPat(tuple(OPAQUE_CALL_BODIES)),), allow_any_len=True, name="x"),
+    lambda x: isinstance(x.arg, CallInfo) or isinstance(x.arg, InstInfo)),
 
   # pattern compiler IR ops (not in tensor/program graphs, but spec-compliant)
   (UPat(Ops.PYLITERAL), lambda: True),
