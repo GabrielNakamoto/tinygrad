@@ -34,8 +34,9 @@ def rdef(u:UOp):
 
 # automatically implement machine instruction as semantically equivalent minimal subset of upstream graph, operands bound as REG PARAMs
 def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
-  def bind(i:int) -> UOp: return (p := oprs[i].param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
-
+  def bind(i:int) -> UOp:
+    if (o:=oprs[i]).is_ins: return UOp.param(i, o.dtype, addrspace=AddrSpace.REG)
+    return (p := o.param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
   bound = {o:bind(i) for i,o in enumerate(oprs)}
   pruned = u.topovisit(lambda u: u.replace(src=tuple(bound.get(s,s) for s in u.src)), bound)
   return pruned.rtag().ins(opc, *oprs, **kwargs)
