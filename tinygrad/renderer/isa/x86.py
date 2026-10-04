@@ -212,7 +212,6 @@ def vinsertps(x:UOp) -> UOp:
     s, v = base(x, i), lane(x, i)
     lanes = [ret.index(imm(dtypes.uint16,j)) if j < i else imm(x.dtype,0.0) for j in range(len(x.src))]
     lanes[i] = s
-    # lanes[i] = s.index(imm(dtypes.uint16,v))
     return impl(UOp(Ops.STACK, src=tuple(lanes)), X86Ops.VINSERTPS, (ret, s, imm(dtypes.uint8, v << 6 | i << 4)))
   return functools.reduce(_insert, range(len(x.src)), undef())
 

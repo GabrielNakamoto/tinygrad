@@ -559,17 +559,6 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
   def opcode(self) -> Any:
     assert self.is_ins, "opcode is only valid for machine instruction calls"
     return self.arg.opcode
-  @functools.cached_property
-  def impl(self) -> UOp:
-    assert self.is_ins, "only machine instructions carry UOp implementations"
-    # NOTE: substitute would traverse the whole graph upstream of the operands
-    new: dict[UOp, UOp] = {}
-    for n in self.body.toposort():
-      if n.op is Ops.PARAM and n.addrspace is AddrSpace.REG:
-        assert 1+n.arg.slot < len(self.src), f"operand binding out of bounds, {1+n.arg.slot} >= {len(self.src)} for {self.opcode}"
-        new[n] = s.impl if (s:=self.src[1+n.arg.slot]).is_ins else s
-      else: new[n] = n.replace(src=tuple(new[x] for x in n.src)) if n.src else n
-    return new[self.body]
   @property
   def body(self) -> UOp:
     """the body of a CALL: the program, copy or function reference being called (its first src)"""

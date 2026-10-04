@@ -32,24 +32,13 @@ def rdef(u:UOp):
   r = u.tag[0] if isinstance(u.tag, tuple) else u.tag
   return r if isinstance(r, Register) else None
 
-# automatically implement machine instruction as minimal equivalent UOp graph pruned from upstream
-# with operands bound when possible as REG PARAMs -> arg
-# quality of implementations contingent on isel, certain instructions cannot be automatically represented
-# ex. VINSERTPS x86 which requires iterative implementation as values are inserted to STACK
+# automatically implement machine instruction as semantically equivalent minimal subset of upstream graph, operands bound as REG PARAMs
 def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
   def bind(i:int) -> UOp: return (p := oprs[i].param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
-  # operands are keyed by the pre-isel value they compute, the first slot wins for repeated operands
-  if u in oprs: return bind(oprs.index(u)).rtag().ins(opc, *oprs, **kwargs)
-  cut: dict[UOp, UOp] = {}
-  for i,o in enumerate(oprs):
-    if o.dtype is dtypes.void: continue
-    cut.setdefault(o.impl if o.is_ins else o, bind(i))
-    if o.is_ins: cut.setdefault(o, bind(i))
-  # prune leafs at operands, rest of graph not necessary for equivalent semantics
-  new: dict[UOp, UOp] = {}
-  for n in u.toposort(gate=lambda n: n not in cut):
-    new[n] = n.replace(src=tuple(new[s] if s in new else cut[s] for s in n.src)) if n.src else n
-  return (cut[u] if u in cut else new[u]).rtag().ins(opc, *oprs, **kwargs)
+
+  bound = {o:bind(i) for i,o in enumerate(oprs)}
+  pruned = u.topovisit(lambda u: u.replace(src=tuple(bound.get(s,s) for s in u.src)), bound)
+  return pruned.rtag().ins(opc, *oprs, **kwargs)
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):
