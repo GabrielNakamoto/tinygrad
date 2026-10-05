@@ -6,7 +6,7 @@ from typing import cast
 from tinygrad.dtype import dtypes, DType, truncate, AddrSpace
 from tinygrad.uop import FastEnum, auto, Ops, GroupOp
 from tinygrad.uop.ops import UOp, UPat, PatternMatcher, promo_dtype
-from tinygrad.renderer.isa import ISARenderer, IselContext, Register, LinearContext, rdef, impl
+from tinygrad.renderer.isa import ISARenderer, IselContext, Register, LinearContext, rdef, impl, bind
 from tinygrad.helpers import unwrap, Target
 
 # ***** X86 Ops *****
@@ -202,7 +202,8 @@ def cmp(x:UOp) -> UOp:
 # comparisons that produce masks, the mask has the width of the operands
 def mask(x:UOp) -> UOp:
   dt, v = x.src[0].dtype, imm(dtypes.uint8, {Ops.CMPLT: 1, Ops.CMPNE: 4, Ops.CMPEQ: 0}[x.op])
-  return impl(x, X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, x.src + (v,)).bitcast(dt)
+  mskd = x.where(imm(dtypes.uint32, (1<<(dt.itemsize*8))-1), imm(dtypes.uint32, 0)).bitcast(dt)
+  return impl(mskd, X86Ops.VCMPSS if dt is dtypes.float32 else X86Ops.VCMPSD, x.src + (v,))
 
 # vinsertps xmm2, xmm0, xmm1, imm
 # inserts any 32 bit element in xmm1 into any position in xmm0 according to immm, result is written to xmm2
@@ -343,12 +344,11 @@ isel_matcher = PatternMatcher([
    UOp.cconst(struct.unpack((dt:=to_int(x.dtype)).fmt, struct.pack(x.dtype.fmt, c.val))[0], dt).bitcast(x.dtype) if not x.tag else None),
   # conditional moves that use masks, the mask has the width of the values
   (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float32), UPat()), name="m").where(UPat.var("a", dtypes.float32), UPat.var("b")).named("x"),
-   lambda m,a,b,x: impl(x, X86Ops.VBLENDVPS, (b, a, mask(m))) if not is_address(a) else None),
+   lambda m,a,b,x: impl((mm:=mask(m)).cast(dtypes.bool).where(a,b), X86Ops.VBLENDVPS, (b, a, mm)) if not is_address(a) else None),
   (UPat(GroupOp.Comparison, src=(UPat(dtype=dtypes.float64), UPat()), name="m").where(UPat.var("a", dtypes.float64), UPat.var("b")).named("x"),
-   lambda m,a,b,x: impl(x, X86Ops.VBLENDVPD, (b, a, mask(m))) if not is_address(a) else None),
+   lambda m,a,b,x: impl((mm:=mask(m)).cast(dtypes.bool).where(a,b), X86Ops.VBLENDVPD, (b, a, mm)) if not is_address(a) else None),
   # in this case we have a mask producing comparison whose user expects a bool, so we convert to bool
-  (UPat(GroupOp.Comparison, src=(UPat.var("y", (dtypes.float32, dtypes.float64)), UPat()), name="x"), lambda y,x:
-   UOp(Ops.AND, src=(mask(x).bitcast(dt:=to_int(y.dtype)), UOp.cconst(1, dt))).bitcast(dtypes.bool)),
+  (UPat(GroupOp.Comparison, src=(UPat.var("y", (dtypes.float32, dtypes.float64)), UPat()), name="x"), lambda y,x: mask(x).cast(dtypes.bool)),
   # conditional moves that use flags
   # TODO: remove this once we allow all flag producing ops in cmove
   # the blends took every float gate a mask can serve, so a gate that is still not an integer comparison becomes one here
@@ -358,16 +358,18 @@ isel_matcher = PatternMatcher([
   (UPat(Ops.CMPLT, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: impl(x, X86Ops.CMOVB, (b, a, cmp(m)))),
   (UPat(Ops.CMPEQ, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: impl(x, X86Ops.CMOVE, (b, a, cmp(m)))),
   (UPat(Ops.CMPNE, name="m").where(UPat.var("a"), UPat.var("b")).named("x"), lambda m,a,b,x: impl(x, X86Ops.CMOVNE, (b, a, cmp(m)))),
+  # bool cast
+  (UPat.var("x").cast(dtypes.bool), lambda x: x.bitcast((dt:=to_int(x.dtype))).alu(Ops.CMPNE, imm(dt,0)) if x.dtype is not dtypes.bool else None),
   # jumps, use flags
   (UPat(Ops.IF, src=(UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.uints), UPat()), name="y"),), name="x"), lambda y,x: impl(x, X86Ops.JB, (cmp(y),))),
   (UPat(Ops.IF, src=(UPat(Ops.CMPLT, name="y"),), name="x"), lambda y,x: impl(x, X86Ops.JL, (cmp(y),))),
   (UPat(Ops.IF, src=(UPat(Ops.CMPEQ, name="y"),), name="x"), lambda y,x: impl(x, X86Ops.JE, (cmp(y),))),
   (UPat(Ops.IF, src=(UPat(Ops.CMPNE, name="y"),), name="x"), lambda y,x: impl(x, X86Ops.JNE, (cmp(y),))),
   # comparisons whose user doesn't use the flag, move flag result to register
-  (UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.uints), UPat()), name="x"), lambda x: impl(x, X86Ops.SETB, (cmp(x),))),
-  (UPat(Ops.CMPLT, name="x"), lambda x: impl(x, X86Ops.SETL, (cmp(x),))),
-  (UPat(Ops.CMPEQ, name="x"), lambda x: impl(x, X86Ops.SETE, (cmp(x),))),
-  (UPat(Ops.CMPNE, name="x"), lambda x: impl(x, X86Ops.SETNE, (cmp(x),))),
+  (UPat(Ops.CMPLT, src=(UPat(dtype=dtypes.uints), UPat()), name="x"), lambda x: impl((flag:=cmp(x)), X86Ops.SETB, (flag,))),
+  (UPat(Ops.CMPLT, name="x"), lambda x: impl((flag:=cmp(x)), X86Ops.SETL, (flag,))),
+  (UPat(Ops.CMPEQ, name="x"), lambda x: impl((flag:=cmp(x)), X86Ops.SETE, (flag,))),
+  (UPat(Ops.CMPNE, name="x"), lambda x: impl((flag:=cmp(x)), X86Ops.SETNE, (flag,))),
   # float unary
   (UPat.var("y", dtypes.float32).sqrt().named("x"), lambda y,x: impl(x, X86Ops.VSQRTSS, (y, y))),
   (UPat.var("y", dtypes.float64).sqrt().named("x"), lambda y,x: impl(x, X86Ops.VSQRTSD, (y, y))),

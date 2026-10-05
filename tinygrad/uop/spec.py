@@ -110,8 +110,7 @@ spec_shared = PatternMatcher([
   # a CUSTOM_FUNCTION names an external function: the arg is a CustomFunction stating the return dtype
   (UPat(Ops.CUSTOM_FUNCTION, name="x", allow_any_len=True), lambda x: isinstance(x.arg, CustomFunction)),
   # CALL: the body is always an opaque body stating the dtype, the arg is a CallInfo
-  (UPat(Ops.CALL, src=(UPat(tuple(OPAQUE_CALL_BODIES)),), allow_any_len=True, name="x"),
-    lambda x: isinstance(x.arg, CallInfo) or isinstance(x.arg, InstInfo)),
+  (UPat(Ops.CALL, name="x"), lambda x: (x.body.op in OPAQUE_CALL_BODIES and isinstance(x.arg, CallInfo)) or isinstance(x.arg, InstInfo)),
 
   # pattern compiler IR ops (not in tensor/program graphs, but spec-compliant)
   (UPat(Ops.PYLITERAL), lambda: True),

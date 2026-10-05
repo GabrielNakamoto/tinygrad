@@ -32,12 +32,13 @@ def rdef(u:UOp):
   r = u.tag[0] if isinstance(u.tag, tuple) else u.tag
   return r if isinstance(r, Register) else None
 
+def bind(o:UOp, i:int) -> UOp:
+  if o.is_ins: return UOp.param(i, o.dtype, o._shape or (1,), addrspace=AddrSpace.REG)
+  return (p := o.param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
+
 # automatically implement machine instruction as semantically equivalent minimal subset of upstream graph, operands bound as REG PARAMs
 def impl(u:UOp, opc:Any, oprs:tuple[UOp,...], **kwargs):
-  def bind(i:int) -> UOp:
-    if (o:=oprs[i]).is_ins: return UOp.param(i, o.dtype, addrspace=AddrSpace.REG)
-    return (p := o.param_like(i)).replace(arg=replace(p.arg, addrspace=AddrSpace.REG))
-  bound = {o:bind(i) for i,o in enumerate(oprs)}
+  bound = {o:bind(o,i) for i,o in enumerate(oprs)}
   pruned = u.topovisit(lambda u: u.replace(src=tuple(bound.get(s,s) for s in u.src)), bound)
   return pruned.rtag().ins(opc, *oprs, **kwargs)
 

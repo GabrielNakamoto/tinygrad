@@ -3,6 +3,7 @@ from tinygrad import Tensor, Device, dtypes, nn, GlobalCounters
 from tinygrad.helpers import VIZ
 from tinygrad.renderer.isa import ISARenderer, IselContext, Register
 from tinygrad.uop.ops import graph_rewrite, PatternMatcher, UPat, UOp, Ops, ProgramInfo, AddrSpace, GroupOp
+from tinygrad.uop.weak import pm_cast_const
 from tinygrad.codegen import full_rewrite_to_sink, pm_to_program
 from tinygrad.engine.realize import _get_call_to_compile, run_linear
 from test.runtime.test_ops import prepare_test_op
@@ -33,7 +34,7 @@ def _cross_exec(graph:Tensor) -> int:
     # plug through non-assembly backend's render pass
     prg_info = ProgramInfo.from_sink(sink, final_ren.target)
     prg = UOp(Ops.PROGRAM, src=(sink,), arg=prg_info)
-    prg = graph_rewrite(prg, pm_to_program, ctx=final_ren, name="linearize/render")
+    prg = graph_rewrite(prg, pm_cast_const+pm_to_program, ctx=final_ren, name="linearize/render")
     if VIZ: graph_rewrite(prg, PatternMatcher([]), name="View Program")
     return prg
 
@@ -74,6 +75,12 @@ class TestRetarget(unittest.TestCase):
 
   def test_transfer_idiv(self):
     self._helper_test_cross((Tensor([5,6,7]),Tensor([1,2,3])), lambda x,y: x//y)
+
+  def test_transfer_fcmp(self):
+    self._helper_test_cross((Tensor.rand(4), Tensor.rand(4)), lambda x,y: (x<y).contiguous())
+
+  def test_transfer_fblend(self):
+    self._helper_test_cross((Tensor.rand(8), Tensor.rand(8)), lambda x,y: (x<y).where(27.0, -3.14152).float())
 
   def test_transfer_mnist(self):
     layers = [
