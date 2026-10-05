@@ -508,9 +508,10 @@ def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   # loop, cmp on backedge all we need is a jmp tag
   if x.dtype is dtypes.void: return (label, [label])
   else:
-    acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),), tag=x.tag)
-    # acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),) + x.src[1:], tag=x.tag)
-    cmp = UOp(Ops.NOOP).ins(X86Ops.CMPi if x.src[0].op is Ops.CAST else X86Ops.CMP, acc, x.src[0])
+    # an AFTER-wrapped bound carries the loop's ordering deps, they keep the acc unique per loop (hash-consing)
+    bound, deps = ((b:=x.src[0]).src[0], b.src[1:]) if (b:=x.src[0]).op is Ops.AFTER else (x.src[0], x.src[1:])
+    acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),) + tuple(deps))
+    cmp = UOp(Ops.NOOP).ins(X86Ops.CMPi if bound.op is Ops.CAST else X86Ops.CMP, acc, bound)
     jump_out = UOp(Ops.NOOP).ins(X86Ops.JGE, cmp, tag=f".LOOP_OUT_{loop_label}")
     ctx.loop_label[acc] = loop_label
     return (acc, [acc, label, cmp, jump_out])
