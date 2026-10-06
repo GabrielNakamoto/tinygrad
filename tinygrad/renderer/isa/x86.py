@@ -450,7 +450,7 @@ isel_matcher = PatternMatcher([
   (UPat(dtype=dtypes.float64).bitcast(dtypes.int64s).named("x"), lambda x: impl(x, X86Ops.VMOVQm, x.src)),
   # lower register mops: a store is just a copy, load is an anon copy to preserve ordering
   (UPat.var("a").store(UPat.var("val"), name="x"), lambda ctx,a,val,x:
-    bind((v:=val.after(a,buf))).ins(copy_op(val.dtype), src=(v,), tag=(rdef(buf),))
+    impl((v:=val.after(a,buf)), copy_op(val.dtype), (v,), tag=(rdef(buf),))
     if is_regbuf((buf := a.src[0] if a.op is Ops.INDEX else a)) and isinstance(rdef(buf), Register) and rdef(buf)._cons else None),
   (UPat.var("a").load().named("x"), lambda ctx,a,x:
     impl(x, copy_op(x.dtype), (buf,)) if is_regbuf((buf:=a.src[0] if a.op is Ops.INDEX else a)) else None),
@@ -504,21 +504,21 @@ pre_regalloc_matcher = PatternMatcher([
 # TODO: control flow should be overhauled so that this isn't necessary
 def lower_range(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
   loop_label = "_".join(str(i) for i in x.axis_id)
-  label = impl(UOp(Ops.NOOP), X86Ops.LABEL, (), tag=f".LOOP_{loop_label}")
+  label = UOp(Ops.NOOP).ins(X86Ops.LABEL, tag=f".LOOP_{loop_label}")
   # loop, cmp on backedge all we need is a jmp tag
   if x.dtype is dtypes.void: return (label, [label])
   else:
     # an AFTER-wrapped bound carries the loop's ordering deps, they keep the acc unique per loop (hash-consing)
     bound, deps = ((b:=x.src[0]).src[0], b.src[1:]) if (b:=x.src[0]).op is Ops.AFTER else (x.src[0], x.src[1:])
-    acc = impl(x, X86Ops.MOVi, (imm(x.dtype, 0),) + tuple(deps))
+    acc = x.ins(X86Ops.MOVi, imm(x.dtype, 0), *deps, tag=x.tag)
     cmp = UOp(Ops.NOOP).ins(X86Ops.CMPi if bound.op is Ops.CAST else X86Ops.CMP, acc, bound)
     jump_out = UOp(Ops.NOOP).ins(X86Ops.JGE, cmp, tag=f".LOOP_OUT_{loop_label}")
     ctx.loop_label[acc] = loop_label
     return (acc, [acc, label, cmp, jump_out])
 
 def lower_end(ctx, x:UOp) -> tuple[UOp, list[UOp]]:
-  end_label = impl(UOp(Ops.NOOP), X86Ops.LABEL, (), tag=f".LOOP_OUT_{ctx.loop_label[x.src[1]]}")
-  jmp = impl(UOp(Ops.NOOP), X86Ops.JMP, (), tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
+  end_label = UOp(Ops.NOOP).ins(X86Ops.LABEL, tag=f".LOOP_OUT_{ctx.loop_label[x.src[1]]}")
+  jmp = UOp(Ops.NOOP).ins(X86Ops.JMP, tag=f".LOOP_{ctx.loop_label[x.src[1]]}")
   inc = impl(x.src[1], X86Ops.ADDi, (imm(x.src[1].dtype, 1),), tag=x.src[1].tag)
   return (inc, [inc, jmp, end_label])
 
