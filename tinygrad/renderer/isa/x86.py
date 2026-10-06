@@ -450,7 +450,7 @@ isel_matcher = PatternMatcher([
   (UPat(dtype=dtypes.float64).bitcast(dtypes.int64s).named("x"), lambda x: impl(x, X86Ops.VMOVQm, x.src)),
   # lower register mops: a store is just a copy, load is an anon copy to preserve ordering
   (UPat.var("a").store(UPat.var("val"), name="x"), lambda ctx,a,val,x:
-    impl((v:=val.after(a,buf)), copy_op(val.dtype), (v,), tag=(rdef(buf),))
+    impl((v:=val.after(buf)), copy_op(val.dtype), (v,), tag=(rdef(buf),))
     if is_regbuf((buf := a.src[0] if a.op is Ops.INDEX else a)) and isinstance(rdef(buf), Register) and rdef(buf)._cons else None),
   (UPat.var("a").load().named("x"), lambda ctx,a,x:
     impl(x, copy_op(x.dtype), (buf,)) if is_regbuf((buf:=a.src[0] if a.op is Ops.INDEX else a)) else None),
@@ -463,7 +463,7 @@ isel_matcher = PatternMatcher([
    impl(x, _xmm_sz(x), fold_address(a))),
   (UPat(Ops.LOAD, dtypes.ints+(dtypes.bool,), src=(UPat(name="a"),), name="x"), lambda x,a: None if a.addrspace is AddrSpace.REG else
    impl(x, X86Ops.MOV, fold_address(a)) if x.max_numel() == 1 else impl(x, _xmm_sz(x), fold_address(a))),
-  (UPat.var("a").store(UPat.var("b", dtypes.floats), name="x"), lambda a,b,x:
+  (UPat.var("a").store(UPat.var("b", dtypes.floats), name="x"), lambda a,b,x: None if a.addrspace is AddrSpace.REG else
    impl(x, X86Ops.VPEXTRW, fold_address(a) + (b, imm(dtypes.uint8, 0))) if b.max_numel() * b.dtype.itemsize == 2 else
    impl(x, _xmm_sz_m(b), fold_address(a) + (b,))),
   (UPat.var("a").store(UPat.var("b", dtypes.ints+(dtypes.bool,)), name="x"), lambda a,b,x: None if a.addrspace is AddrSpace.REG else
