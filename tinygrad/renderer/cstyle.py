@@ -14,10 +14,10 @@ base_rewrite = PatternMatcher([
   (UPat(Ops.BINARY, name="x"), lambda ctx,x: f'const unsigned char {ctx[x]}[] = "' + ''.join(f'\\x{b:02x}' for b in x.arg) + '";'),
 
   # range/loop/if/endif
-  (UPat(Ops.RANGE, dtypes.void), lambda ctx: "for (;;) {"),
+  (UPat(Ops.RANGE, dtypes.void), lambda ctx: "do {"),
   (UPat(Ops.RANGE, name="x"),
    lambda ctx,x: f"for ({ctx.render_dtype(x.dtype)} {ctx[x]} = 0; {ctx[x]} < {ctx[x.src[0]]}; {ctx[x]}++) {{"),
-  (UPat(Ops.BACKEDGE, src=(UPat(), UPat(Ops.RANGE), UPat(name="c", dtype=dtypes.bool))), lambda ctx,c: f"  if (!({ctx[c]})) {{ break; }}\n}}"),
+  (UPat(Ops.BACKEDGE, src=(UPat(), UPat(Ops.RANGE), UPat(name="c", dtype=dtypes.bool))), lambda ctx,c: f"}} while({ctx[c]});"),
   (UPat(Ops.IF, name="x"), lambda ctx,x: f"if ({ctx[x.src[0]]}) {{"),
   (UPat((Ops.ENDIF, Ops.END)), lambda ctx: "}"),
 

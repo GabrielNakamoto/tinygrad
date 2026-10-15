@@ -268,6 +268,14 @@ pm_implicit_barriers = PatternMatcher([
   (UPat((Ops.END, Ops.BACKEDGE), name="end"), add_war_barrier),
 ])
 
+def init_backedge(sink:UOp):
+  backedges = [u for u in sink.toposort() if u.op is Ops.BACKEDGE]
+  bufs = {u.src[1]:UOp.alloc((1,), dtypes.bool, addrspace=AddrSpace.REG) for u in backedges}
+  loops = {l:l.replace(src=(l.src[0].after(buf),)) for l,buf in bufs.items()}
+  replaces = {u:u.replace(src=(u.src[0], loops[u.src[1]], bufs[u.src[1]].after(bufs[u.src[1]][0].store(u.src[2]))[0].load()))
+              for u in backedges}
+  return sink.substitute(loops | replaces)
+
 def full_rewrite_to_sink(ast:UOp, ren:Renderer, optimize:bool=True) -> UOp:
   if DEBUG >= 5: print(render_uir(ast))
   if SPEC: type_verify(ast, spec_tensor)
@@ -363,6 +371,9 @@ def full_rewrite_to_sink(ast:UOp, ren:Renderer, optimize:bool=True) -> UOp:
   pm_final_rewrite = pm_commit_weak+pm_decomp+extra_matcher+pm_split_ends
   sink = graph_rewrite(sink, pm_final_rewrite+pm_remove_invalid, ctx=ren, name="final rewrite")
 
+  # hoist backedge cond as bool buffer outside loop to allow for do while
+  sink = init_backedge(sink)
+
   # commit every const still bare so no renderer reads one
   sink = graph_rewrite(sink, pm_cast_const, name="cast consts")
 
@@ -374,6 +385,7 @@ def full_rewrite_to_sink(ast:UOp, ren:Renderer, optimize:bool=True) -> UOp:
 
   # this was the linearizer
   sink = graph_rewrite(sink, pm_add_control_flow, ctx=CFGContext(sink), name="add control flow", bottom_up=True)
+
 
   # put the variables in slots
   num_params = max([x.arg.slot + 1 for x in sink.toposort() if x.op is Ops.PARAM and x.arg.slot != -1], default=0)
