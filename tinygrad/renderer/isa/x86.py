@@ -167,6 +167,9 @@ pre_isel_matcher = PatternMatcher([
   # a conditional backedge picks with the flags, and so does the cmove, which is legalized in isel
   (UPat(Ops.BACKEDGE, src=(UPat(), UPat(), UPat.var("m", dtypes.bool)), name="x"),
    lambda m,x: x.replace(src=x.src[:2]+(g,)) if (g:=flag_gate(m)) is not None else None),
+  # conditional moves between addresses, lea both srcs
+  (UPat.var("m").where(UPat((Ops.INDEX, Ops.SHRINK), name="a"), UPat((Ops.INDEX, Ops.SHRINK), name="b")), lambda m,a,b:
+   m.where(a.bitcast(dtypes.uint64), b.bitcast(dtypes.uint64)) if not _is_vec_xmm(a.src[0]) else None),
 ])
 
 # ***** X86 registers *****
@@ -319,9 +322,6 @@ isel_matcher = PatternMatcher([
   # **** Op -> X86Op ****
   # function abi constraints
   (UPat((Ops.PARAM, Ops.SPECIAL), name="x"), abi),
-  # conditional moves between addresses, lea both srcs
-  (UPat.var("m").where(UPat((Ops.INDEX, Ops.SHRINK), name="a"), UPat((Ops.INDEX, Ops.SHRINK), name="b")), lambda m,a,b:
-   m.where(lea(a), lea(b)) if not _is_vec_xmm(a.src[0]) else None),
   # constants that can't be immediates, move them to registers
   (UPat.cvar("c").cast(dtypes.int64s, name="x"), lambda c,x: x.ins(X86Ops.MOVABS, src=(imm(x.dtype, c.val),)) if not x.tag else None),
   (UPat.cvar("c").cast(dtypes.ints+(dtypes.bool,), name="x"), lambda c,x: x.ins(X86Ops.MOVi, src=(imm(x.dtype, c.val),)) if not x.tag else None),
