@@ -129,8 +129,6 @@ extra_matcher = PatternMatcher([
     lambda addr,alt,gate: gate.where(addr.load(), alt) if is_regbuf(addr.src[0]) else None),
   (UPat((Ops.INDEX, Ops.SHRINK), name="addr").store(UPat.var("val"), UPat.var("gate")),
     lambda addr,val,gate: addr.store(gate.where(val, addr.load())) if is_regbuf(addr.src[0]) else None),
-  # widening a uint32 is free, the 32bit write that produced it already zeroed the upper half
-  (UPat(dtype=dtypes.uint32).cast(dtypes.int64s, name="x"), lambda x: x.replace(op=Ops.BITCAST)),
   (UPat.var("y", dtypes.ints+(dtypes.bool,)).cast(dtypes.ints, name="x"),
    lambda y,x: x.replace(op=Ops.BITCAST) if x.dtype.itemsize == y.dtype.itemsize else None),
 ])
@@ -157,6 +155,7 @@ def flag_gate(m:UOp) -> UOp|None:
   return None if m.op in GroupOp.Comparison and m.src[0].dtype not in dtypes.floats else m.ne(UOp.cconst(0, dtypes.int))
 
 # legalize the new style graph for isel. NOTE: this runs after the spec is verified, some of these rewrites violate it
+# any isa expansions that require recursive rewrites belong here so isel can walk. after this point mostly 1:1 opcode/operand matching
 pre_isel_matcher = PatternMatcher([
   # vector BUFFERs get modeled in STACK space
   (UPat((Ops.BUFFER, Ops.ALLOC), name="x"), lambda x: x.replace(arg=replace(x.arg, addrspace=AddrSpace.LOCAL))
@@ -169,11 +168,13 @@ pre_isel_matcher = PatternMatcher([
    lambda m,x: x.replace(src=x.src[:2]+(g,)) if (g:=flag_gate(m)) is not None else None),
   # conditional moves between addresses, lea both srcs
   (UPat.var("m").where(UPat((Ops.INDEX, Ops.SHRINK), name="a"), UPat((Ops.INDEX, Ops.SHRINK), name="b")), lambda m,a,b:
-   m.where(a.bitcast(dtypes.uint64), b.bitcast(dtypes.uint64)) if not _is_vec_xmm(a.src[0]) else None),
+   m.where(a.bitcast(dtypes.uint64), b.bitcast(dtypes.uint64)).bitcast(a.dtype) if not _is_vec_xmm(a.src[0]) else None),
   # any non-valid direct cmov needs gate
   # TODO: remove this once we allow all flag producing ops in cmove
   (UPat.var("m", dtypes.bool).where(UPat.var("a"), UPat.var("b")), lambda m,a,b: g.where(a, b) if (g:=flag_gate(m)) is not None
     and not (m.op in GroupOp.Comparison and a.dtype in (dtypes.float32,dtypes.float64) and a.dtype == m.src[0].dtype) else None),
+  # widening a uint32 is free, the 32bit write that produced it already zeroed the upper half
+  (UPat(dtype=dtypes.uint32).cast(dtypes.int64s, name="x"), lambda x: x.replace(op=Ops.BITCAST)),
 ])
 
 # ***** X86 registers *****
