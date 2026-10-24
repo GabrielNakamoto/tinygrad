@@ -1,7 +1,7 @@
 import itertools
 from tinygrad.helpers import dedup
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
-from tinygrad.renderer.isa import ISARenderer, Register, rdef, regs, with_regs, LinearContext
+from tinygrad.renderer.isa import ISARenderer, Register, rdef, LinearContext
 from typing import Any
 from dataclasses import replace
 

@@ -6,7 +6,7 @@ from typing import cast
 from tinygrad.dtype import dtypes, DType, truncate, AddrSpace
 from tinygrad.uop import FastEnum, auto, Ops, GroupOp
 from tinygrad.uop.ops import UOp, UPat, PatternMatcher, promo_dtype
-from tinygrad.renderer.isa import ISARenderer, IselContext, Register, LinearContext, rdef, regs, with_regs
+from tinygrad.renderer.isa import ISARenderer, IselContext, Register, LinearContext, rdef, is_reg
 from tinygrad.helpers import unwrap, Target
 from dataclasses import replace
 
@@ -292,22 +292,6 @@ def _xmm_sz_m(x: UOp) -> X86Ops:
   if bits >= 8: return X86Ops.VMOVSDm
   return X86Ops.VMOVSSm
 
-def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
-  # register placeholders with real registers
-  if x.op is Ops.INS and x.arg[0] is X86Ops.IMM: return None
-  # no register definition
-  if x.dtype is dtypes.void: return None
-  # already allocated vregs
-  if regs(x) and regs(x)[0]._cons: return None
-  # a register buffer is a REG, a stack buffer becomes the LEA of its address before regalloc
-  if x.op in {Ops.BUFFER, Ops.ALLOC}: return reg(x.dtype, regbuf_reg(x)) if x.addrspace is AddrSpace.REG else None
-  if regs(x): defs = [ctx.vreg(regs(x), x.dtype.itemsize)]
-  elif x.dtype in dtypes.floats or x.op is Ops.INS and x.arg[0] in XMM_OPS: defs = [ctx.vreg(XMM)]
-  else: defs = [ctx.vreg(WGPR, x.dtype.itemsize)]
-  # TODO: add this once the scheduler can track register pressure
-  # if x.arg[0] in X86GroupOp.WriteFlags: defs.append(ctx.vreg(RFLAGS))
-  return with_regs(x, tuple(defs))
-
 def copy_op(dt:DType) -> X86Ops:
   return {dtypes.float16:X86Ops.VMOVSS, dtypes.float32:X86Ops.VMOVSS, dtypes.float64:X86Ops.VMOVSD, dtypes.bool:X86Ops.MOVZX}.get(dt, X86Ops.MOV)
 
@@ -441,8 +425,18 @@ isel_matcher = PatternMatcher([
   (UPat.var("a").store(UPat.var("b", dtypes.ints+(dtypes.bool,)), name="x"), lambda a,b,x: None if a.addrspace is AddrSpace.REG else
    x.ins(_xmm_sz_m(b), src=fold_address(a) + (b,)) if b.max_numel() > 1 else
    x.ins(X86Ops.MOVm, src=fold_address(a) + (b,)) if (i:=to_imm(b)) is None else x.ins(X86Ops.MOVi, src=fold_address(a) + (i,))),
-  # allocate virtual registers
-  (UPat((Ops.INS, Ops.BUFFER, Ops.ALLOC), name="x"), alloc_vregs),
+])
+
+# how to express size != dt.itemsize?, resolve at encoding time based on reg class name?
+def xmm_reg(x:UOp) -> bool: return x.dtype in dtypes.floats or (x.op is Ops.INS and x.arg[0] in XMM_OPS)
+
+# insert virtual registers as native named memory ALLOCs in the graph
+pm_alloc_vregs = PatternMatcher([
+  (UPat((Ops.BUFFER, Ops.ALLOC), name="x"), lambda ctx,x: ctx.vreg(x.dtype, "xmm" if x.dtype in dtypes.floats else "wgpr")
+    if x.addrspace is AddrSpace.REG and not is_reg(x) else None),
+  (UPat(Ops.INS, name="x"), lambda ctx,x:
+    (r:=ctx.vreg(x.dtype, "xmm" if xmm_reg(x) else "wgpr")).after(r.store(x.replace(src=(r, *x.src))))
+    if not (x.dtype == dtypes.void or x.arg[0] is X86Ops.IMM or (len(x.src) and is_reg(x.src[0]))) else None),
 ])
 
 # ***** pre register allocation *****
@@ -692,6 +686,7 @@ class X86Renderer(ISARenderer):
   global_max = (1, 0, 0)
   extra_matcher = extra_matcher
   pre_isel_matcher = pre_isel_matcher
+  vreg_alloc_matcher = pm_alloc_vregs
   isel_matcher = isel_matcher
   pre_regalloc_matcher = pre_regalloc_matcher
   post_regalloc_matcher = post_regalloc_matcher
