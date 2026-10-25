@@ -1,7 +1,7 @@
 import itertools
 from tinygrad.helpers import dedup
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
-from tinygrad.renderer.isa import ISARenderer, Register, rdef, LinearContext
+from tinygrad.renderer.isa import ISARenderer, rdef, LinearContext
 from typing import Any
 from dataclasses import replace
 
@@ -9,7 +9,7 @@ PSEUDO_OPS = {Ops.CONST, Ops.CAST, Ops.BITCAST, Ops.NOOP, Ops.AFTER, Ops.BARRIER
 
 class LinearScanRegallocContext:
   # returns the uop that defines the virtual register
-  def vdef(self, v:Register) -> UOp: return self.uops[self.live_range[v][0]]
+  # def vdef(self, v:Register) -> UOp: return self.uops[self.live_range[v][0]]
   def __init__(self, ctx:LinearContext, uops:list[UOp], ren:ISARenderer):
     self.uops = uops
     self.ren = ren

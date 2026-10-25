@@ -6,7 +6,7 @@ from typing import cast
 from tinygrad.dtype import dtypes, DType, truncate, AddrSpace
 from tinygrad.uop import FastEnum, auto, Ops, GroupOp
 from tinygrad.uop.ops import UOp, UPat, PatternMatcher, promo_dtype
-from tinygrad.renderer.isa import ISARenderer, IselContext, Register, LinearContext, rdef, is_reg
+from tinygrad.renderer.isa import ISARenderer, IselContext, LinearContext, rdef, is_reg
 from tinygrad.helpers import unwrap, Target
 from dataclasses import replace
 
@@ -15,7 +15,7 @@ from dataclasses import replace
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
   # these aren't real instructions
-  LABEL = auto(); IMM = auto(); REG = auto()
+  LABEL = auto(); IMM = auto()
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -172,33 +172,24 @@ pre_isel_matcher = PatternMatcher([
 ])
 
 # ***** X86 registers *****
-RAX = Register("rax", 0)
-RCX = Register("rcx", 1)
-RDX = Register("rdx", 2)
-RBX = Register("rbx", 3)
-RSP = Register("rsp", 4)
-RBP = Register("rbp", 5)
-RSI = Register("rsi", 6)
-RDI = Register("rdi", 7)
-GPR = (RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI) + tuple(Register(f"r{i}", i) for i in range(8, 16))
-XMM = tuple(Register(f"xmm{i}", i, size=16) for i in range(16))
-# gprs you can write to
-WGPR = tuple(r for r in GPR if r != RSP)
-
-CALLEE_SAVED = (RBX, RBP, GPR[12], GPR[13], GPR[14], GPR[15])
+gprs = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8,16)]
+REG_CLASSES = {
+  "xmm":(16,16,None),
+  "gpr":(16,8,gprs),
+  "wgpr":(15,8,[r for r in gprs if r != "rsp"]),
+  "callee":(6,8,["rbx", "rbp", "r12", "r13", "r14", "r15"])
+}
 
 reg_strs = {"rax": {4:"eax", 2:"ax", 1:"al"}, "rcx": {4:"ecx", 2:"cx", 1:"cl"}, "rdx": {4:"edx", 2:"dx", 1:"dl"}, "rbx": {4:"ebx", 2:"bx", 1:"bl"},
         "rsp": {4:"esp", 2:"sp", 1:"spl"}, "rbp": {4:"ebp", 2:"bp", 1:"bpl"}, "rsi": {4:"esi", 2:"si", 1:"sil"}, "rdi": {4:"edi", 2:"di", 1:"dil"},
         **{f"r{i}": {4:f"r{i}d", 2:f"r{i}w", 1:f"r{i}b"} for i in range(8, 16)}}
 
 # a register defined outside the instruction stream: the stack pointer, the args pointer, a callee saved register
-def reg(dt:DType, r:Register) -> UOp: return UOp(Ops.INS, arg=(X86Ops.REG, dt, r))
-stack_pointer = reg(dtypes.uint64, RSP)
-args_pointer = reg(dtypes.uint64, RDI)
+def reg(dt:DType, r:str) -> UOp: return UOp.alloc((1,), dt, addrspace=AddrSpace.REG, name=r)
+stack_pointer = reg(dtypes.uint64, "rsp")
+args_pointer = reg(dtypes.uint64, "rdi")
 
 # ***** X86 instruction selection *****
-# a register buffer is its own virtual register, named by its identity
-def regbuf_reg(x:UOp) -> Register: return Register(f"b{x.key.hex()}", 0, *((XMM, 16) if x.dtype in dtypes.floats else (WGPR, x.dtype.itemsize)))
 # a value moved into a register constrained to cons
 def pin(ctx:IselContext, x:UOp, cons:Register|tuple[Register, ...]) -> UOp: return x.ins(X86Ops.MOV, ctx.vreg(cons, x.dtype.itemsize), src=(x,))
 def base(x:UOp, i:int) -> UOp: return s.src[0] if (s:=x.src[i]).op is Ops.INDEX else s
@@ -433,10 +424,10 @@ def xmm_reg(x:UOp) -> bool: return x.dtype in dtypes.floats or (x.op is Ops.INS 
 # insert virtual registers as native named memory ALLOCs in the graph
 pm_alloc_vregs = PatternMatcher([
   (UPat((Ops.BUFFER, Ops.ALLOC), name="x"), lambda ctx,x: ctx.vreg(x.dtype, "xmm" if x.dtype in dtypes.floats else "wgpr")
-    if x.addrspace is AddrSpace.REG and not is_reg(x) else None),
+    if x.addrspace is AddrSpace.REG and not is_reg(x, REG_CLASSES) else None),
   (UPat(Ops.INS, name="x"), lambda ctx,x:
     (r:=ctx.vreg(x.dtype, "xmm" if xmm_reg(x) else "wgpr")).after(r.store(x.replace(src=(r, *x.src))))
-    if not (x.dtype == dtypes.void or x.arg[0] is X86Ops.IMM or (len(x.src) and is_reg(x.src[0]))) else None),
+    if not (x.dtype == dtypes.void or x.arg[0] is X86Ops.IMM or (len(x.src) and is_reg(x.src[0], REG_CLASSES))) else None),
 ])
 
 # ***** pre register allocation *****
@@ -466,12 +457,13 @@ def label(x:UOp) -> UOp: return UOp(Ops.INS, arg=(X86Ops.LABEL, dtypes.void), sr
 def lower_range(x:UOp) -> tuple[UOp, list[UOp]]:
   if x.dtype is dtypes.void: return x, [x, label(x)]
   bound, deps = (x.src[0].src[0], x.src[0].src[1:]) if x.src[0].op is Ops.AFTER else (x.src[0], ())
-  idx = UOp(Ops.INS, arg=(X86Ops.MOVi, x.dtype, regbuf_reg(x)), src=(imm(x.dtype, 0),) + deps)
+  r = reg(x.dtype, f"wgpr@{x.key.hex()}")
+  idx = r.after(r.store(UOp(Ops.INS, arg=(X86Ops.MOVi, x.dtype), src=(r, imm(x.dtype, 0),) + deps)))
   cmp = UOp(Ops.INS, arg=(X86Ops.CMPi if is_imm(bound) else X86Ops.CMP, dtypes.void), src=(idx, bound))
   return idx.after(x), [idx, x, start:=label(x), cmp, UOp(Ops.INS, arg=(X86Ops.JGE, dtypes.void), src=(start, cmp))]
 
 def lower_end(x:UOp, c:UOp) -> tuple[UOp, list[UOp]]:
-  return (end:=x.replace(src=(x.src[0], c.src[1]))), [c.ins(X86Ops.ADDi, *regs(c.src[0]), src=(c, imm(c.dtype, 1))), end]
+  return (end:=x.replace(src=(x.src[0], c.src[1]))), [c.ins(X86Ops.ADDi, c.src[0], src=(c, imm(c.dtype, 1))), end]
 
 pre_regalloc_matcher = PatternMatcher([
   (UPat(Ops.BUFFER, name="x"), lambda ctx,x: alloc_buffer(ctx,x) if x.addrspace is not AddrSpace.REG else None),
@@ -690,6 +682,7 @@ class X86Renderer(ISARenderer):
   isel_matcher = isel_matcher
   pre_regalloc_matcher = pre_regalloc_matcher
   post_regalloc_matcher = post_regalloc_matcher
+  reg_classes = REG_CLASSES
   code_for_op = {x: lambda: None for x in (Ops.SQRT, Ops.AND, Ops.OR, Ops.SHL, Ops.SHR, Ops.NEG, Ops.SUB, Ops.FDIV, Ops.CMPLT, Ops.CMPEQ)}
   linear_ctx_type = X86LinearContext
   def __init__(self, target:Target):

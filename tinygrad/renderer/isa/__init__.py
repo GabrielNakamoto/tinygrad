@@ -15,8 +15,8 @@ class IselContext:
 
   def vreg(self, dt:DType, cons:str) -> UOp: return UOp.alloc((1,), dt, addrspace=AddrSpace.REG, name=f"{cons}@{next(self.reg_n)}")
 
-# TODO: narrower, check is class
-def is_reg(x:UOp) -> bool: return x.op in GroupOp.Defines and x.addrspace == AddrSpace.REG and isinstance(x.arg.name, str)
+def is_reg(x:UOp, classes:dict) -> bool: return x.op in GroupOp.Defines and x.addrspace == AddrSpace.REG \
+  and isinstance(x.arg.name, str) and any(c in x.arg.name for c in classes.keys())
 
 def rdef(u:UOp):
   if u.op in {Ops.AFTER, Ops.BITCAST}: return rdef(u.src[0])
