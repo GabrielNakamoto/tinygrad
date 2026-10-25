@@ -1,31 +1,41 @@
 import itertools
 from tinygrad.helpers import dedup
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
-from tinygrad.renderer.isa import ISARenderer, rdef, LinearContext
+from tinygrad.renderer.isa import ISARenderer, is_reg, rdef, LinearContext
 from typing import Any
 from dataclasses import replace
 
 PSEUDO_OPS = {Ops.CONST, Ops.CAST, Ops.BITCAST, Ops.NOOP, Ops.AFTER, Ops.BARRIER, Ops.STACK}
 
+@dataclass(frozen=True)
+class Register:
+  cons: tuple[int, int, list[str]]
+  idx: int|None = None # assigned at allocation time, None => virtual
+
 class LinearScanRegallocContext:
   # returns the uop that defines the virtual register
-  # def vdef(self, v:Register) -> UOp: return self.uops[self.live_range[v][0]]
+  def vdef(self, v:Register) -> UOp: return self.uops[self.live_range[v][0]]
   def __init__(self, ctx:LinearContext, uops:list[UOp], ren:ISARenderer):
     self.uops = uops
     self.ren = ren
     self.idx = itertools.count()
 
     # compute live ranges
-    self.live_range: dict[Register, list[int]] = {}
+    self.live_range: dict[str, list[int]] = {}
     lr = self.live_range
     loops: dict[int, int] = {} # the interval of each loop, from its RANGE to the last non pseudo uop that reads that RANGE
+    def mreg(u:UOp) -> Register:
+      return Register(c) if (c:=next((c for c in ren.reg_classes.keys() if c in u.arg.name), None)) is not None else None
+
     for idx,u in reversed(list(enumerate(uops))):
       if u.op in PSEUDO_OPS: continue
-      defs = regs(u)
-      for v in defs + tuple(rdef(s) for s in dedup(u.src)):
-        if isinstance(v, Register): lr.setdefault(v, []).insert(0, idx)
-      for v in defs:
+      if is_reg(u, ren.reg_classes):
+        lr.setdefault((v:=mreg(u)), []).insert(0, idx)
         if v in lr and (n:=max((e for s,e in loops.items() if s <= lr[v][-1] < e), default=None)): lr[v].append(n)
+      else:
+        for s in dedup(u.src):
+          if is_reg((r:=rdef(s)), ren.reg_classes):
+            lr.setdefault(mreg(r),[]).append(idx)
       if u.op is Ops.RANGE: loops[idx] = max(j for j,x in enumerate(uops) if u in x.src and x.op not in PSEUDO_OPS)
 
     # allocate registers
