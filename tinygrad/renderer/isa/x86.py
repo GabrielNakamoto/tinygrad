@@ -6,7 +6,7 @@ from typing import cast
 from tinygrad.dtype import dtypes, DType, truncate, AddrSpace
 from tinygrad.uop import FastEnum, auto, Ops, GroupOp
 from tinygrad.uop.ops import UOp, UPat, PatternMatcher, promo_dtype
-from tinygrad.renderer.isa import ISARenderer, IselContext, LinearContext, rdef, is_reg
+from tinygrad.renderer.isa import ISARenderer, IselContext, LinearContext, rdef, is_reg, RegisterClass
 from tinygrad.helpers import unwrap, Target
 from dataclasses import replace
 
@@ -172,14 +172,6 @@ pre_isel_matcher = PatternMatcher([
 ])
 
 # ***** X86 registers *****
-gprs = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8,16)]
-REG_CLASSES = {
-  "xmm":(16,16,None),
-  "gpr":(16,8,gprs),
-  "wgpr":(15,8,[r for r in gprs if r != "rsp"]),
-  "callee":(6,8,["rbx", "rbp", "r12", "r13", "r14", "r15"])
-}
-
 reg_strs = {"rax": {4:"eax", 2:"ax", 1:"al"}, "rcx": {4:"ecx", 2:"cx", 1:"cl"}, "rdx": {4:"edx", 2:"dx", 1:"dl"}, "rbx": {4:"ebx", 2:"bx", 1:"bl"},
         "rsp": {4:"esp", 2:"sp", 1:"spl"}, "rbp": {4:"ebp", 2:"bp", 1:"bpl"}, "rsi": {4:"esi", 2:"si", 1:"sil"}, "rdi": {4:"edi", 2:"di", 1:"dil"},
         **{f"r{i}": {4:f"r{i}d", 2:f"r{i}w", 1:f"r{i}b"} for i in range(8, 16)}}
@@ -418,18 +410,6 @@ isel_matcher = PatternMatcher([
    x.ins(X86Ops.MOVm, src=fold_address(a) + (b,)) if (i:=to_imm(b)) is None else x.ins(X86Ops.MOVi, src=fold_address(a) + (i,))),
 ])
 
-# how to express size != dt.itemsize?, resolve at encoding time based on reg class name?
-def xmm_reg(x:UOp) -> bool: return x.dtype in dtypes.floats or (x.op is Ops.INS and x.arg[0] in XMM_OPS)
-
-# insert virtual registers as native named memory ALLOCs in the graph
-pm_alloc_vregs = PatternMatcher([
-  (UPat((Ops.BUFFER, Ops.ALLOC), name="x"), lambda ctx,x: ctx.vreg(x.dtype, "xmm" if x.dtype in dtypes.floats else "wgpr")
-    if x.addrspace is AddrSpace.REG and not is_reg(x, REG_CLASSES) else None),
-  (UPat(Ops.INS, name="x"), lambda ctx,x:
-    (r:=ctx.vreg(x.dtype, "xmm" if xmm_reg(x) else "wgpr")).after(r.store(x.replace(src=(r, *x.src))))
-    if not (x.dtype == dtypes.void or x.arg[0] is X86Ops.IMM or (len(x.src) and is_reg(x.src[0], REG_CLASSES))) else None),
-])
-
 # ***** pre register allocation *****
 # the flags belong to the last instruction that wrote them. x86 has no good way to store/restore them (then regalloc would
 # handle it), so a consumer that no longer owns its compare re-emits it. Unlike a regalloc rematerialization this is not
@@ -651,23 +631,15 @@ class X86LinearContext(LinearContext):
     super().__init__(ren)
     self.lock: UOp|None = None
 
-  # stack alloc/dealloc and callee saved handling
   def insert_linearized(self, uops:list[UOp]) -> list[UOp]:
-    before, after, used = [], [], {r.name for u in uops if isinstance((r:=rdef(u)), Register)}
-    for r in CALLEE_SAVED:
-      if r.name in used:
-        a = reg(dtypes.uint64, r)
-        slot = self.assign_spill_slot(r,a)
-        before.append(self.ren.spill(slot,a))
-        after.append(self.ren.fill(slot,a,r))
-
     if self.stack_size > 0:
-      before.insert(0, stack_pointer.ins(X86Ops.SUBi, RSP, src=(stack_pointer,imm(dtypes.int32, self.stack_size))))
-      after.append(stack_pointer.ins(X86Ops.ADDi, RSP, src=(stack_pointer,imm(dtypes.int32, self.stack_size))))
-    return before + uops[:-1] + after + [uops[-1]]
+      init = stack_pointer.ins(X86Ops.SUBi, RSP, src=(stack_pointer,imm(dtypes.int32, self.stack_size)))
+      down = stack_pointer.ins(X86Ops.ADDi, RSP, src=(stack_pointer,imm(dtypes.int32, self.stack_size)))
+      return [init] + uops[:-1] + [down] + [uops[-1]]
+    return uops
 
   def assign_spill_slot(self, r:Register, u:UOp) -> int:
-    sz = r.cons[0].size
+    sz = r.spill_size
     offset = self.stack_size + (sz - self.stack_size % sz) %sz
     self.stack_size = offset + sz
     return offset
@@ -678,11 +650,14 @@ class X86Renderer(ISARenderer):
   global_max = (1, 0, 0)
   extra_matcher = extra_matcher
   pre_isel_matcher = pre_isel_matcher
-  vreg_alloc_matcher = pm_alloc_vregs
   isel_matcher = isel_matcher
   pre_regalloc_matcher = pre_regalloc_matcher
   post_regalloc_matcher = post_regalloc_matcher
-  reg_classes = REG_CLASSES
+  reg_classes = [
+    RegisterClass("xmm", [f"xmm{i}" for i in range(16)], 16, lambda u: u.dtype in dtypes.floats or x.arg[0] in XMM_OPS),
+    RegisterClass("wgpr", ["rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8,16)], 8, lambda u: True)
+  ]
+  abiinfo = ABIInfo(set([]))
   code_for_op = {x: lambda: None for x in (Ops.SQRT, Ops.AND, Ops.OR, Ops.SHL, Ops.SHR, Ops.NEG, Ops.SUB, Ops.FDIV, Ops.CMPLT, Ops.CMPEQ)}
   linear_ctx_type = X86LinearContext
   def __init__(self, target:Target):

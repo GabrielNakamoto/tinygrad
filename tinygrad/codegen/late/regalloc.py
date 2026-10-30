@@ -3,14 +3,16 @@ from tinygrad.helpers import dedup
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
 from tinygrad.renderer.isa import ISARenderer, is_reg, rdef, LinearContext
 from typing import Any
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 PSEUDO_OPS = {Ops.CONST, Ops.CAST, Ops.BITCAST, Ops.NOOP, Ops.AFTER, Ops.BARRIER, Ops.STACK}
 
+# virtual register
 @dataclass(frozen=True)
 class Register:
-  cons: tuple[int, int, list[str]]
-  idx: int|None = None # assigned at allocation time, None => virtual
+  name: str
+  cons: tuple[str, ...]
+  spill_size: int
 
 class LinearScanRegallocContext:
   # returns the uop that defines the virtual register
@@ -25,14 +27,15 @@ class LinearScanRegallocContext:
     lr = self.live_range
     loops: dict[int, int] = {} # the interval of each loop, from its RANGE to the last non pseudo uop that reads that RANGE
     def mreg(u:UOp) -> Register:
-      return Register(c) if (c:=next((c for c in ren.reg_classes.keys() if c in u.arg.name), None)) is not None else None
-
+      for name,(cons, sz) in ren.reg_classes.items():
+        if u.arg.name.split(VREG_SENTINAL)[0] == name: return Register(u.arg.name, cons, sz)
+      return None
     for idx,u in reversed(list(enumerate(uops))):
       if u.op in PSEUDO_OPS: continue
       if is_reg(u, ren.reg_classes):
         lr.setdefault((v:=mreg(u)), []).insert(0, idx)
         if v in lr and (n:=max((e for s,e in loops.items() if s <= lr[v][-1] < e), default=None)): lr[v].append(n)
-      else:
+      elif u.op is not Ops.STORE:
         for s in dedup(u.src):
           if is_reg((r:=rdef(s)), ren.reg_classes):
             lr.setdefault(mreg(r),[]).append(idx)
@@ -40,12 +43,13 @@ class LinearScanRegallocContext:
 
     # allocate registers
     self.spills: dict[Register, Any] = {} # mapping from virtual to arbitrary spill slot
-    self.reals: dict[int, dict[Register, Register]] = {} # mapping from virtual to real at each program point
-    self.insert_before: dict[int, list[tuple[Register, Register]]] = {} # fills to be inserted at each program point
-    live: dict[Register, Register] = {} # mapping from virtual to real that's currently assigned to it
-    live_ins: list[dict[Register, Register]] = [] # mapping from virtual to real at loop entry
+    self.reals: dict[int, dict[Register, str]] = {} # mapping from virtual to real at each program point
+    self.insert_before: dict[int, list[tuple[Register, str]]] = {} # fills to be inserted at each program point
+    # live has to be tracked via register string
+    live: dict[Register, str] = {} # mapping from virtual to real that's currently assigned to it
+    live_ins: list[dict[Register, str]] = [] # mapping from virtual to real at loop entry
 
-    def alloc(cons:tuple[Register, ...], i:int) -> Register:
+    def alloc(cons:tuple[str], i:int) -> Register:
       live_inv = {v:k for k,v in live.items()}
       # allocate the best register. Registers not in live or not used again are free and have priority,
       # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
