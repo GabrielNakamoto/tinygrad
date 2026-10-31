@@ -1,7 +1,7 @@
 import itertools
 from tinygrad.helpers import dedup
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
-from tinygrad.renderer.x86 import ISARenderer, Register, rdef, regs, with_regs, LinearContext
+from tinygrad.renderer.x86 import ISARenderer, rdef, LinearContext
 from typing import Any
 from dataclasses import replace
 
@@ -9,33 +9,34 @@ PSEUDO_OPS = {Ops.CONST, Ops.CAST, Ops.BITCAST, Ops.NOOP, Ops.AFTER, Ops.BARRIER
 
 class LinearScanRegallocContext:
   # returns the uop that defines the virtual register
-  def vdef(self, v:Register) -> UOp: return self.uops[self.live_range[v][0]]
+  def vdef(self, v:UOp) -> UOp: return self.uops[self.live_range[v][0]]
   def __init__(self, ctx:LinearContext, uops:list[UOp], ren:ISARenderer):
     self.uops = uops
     self.ren = ren
     self.idx = itertools.count()
 
     # compute live ranges
-    self.live_range: dict[Register, list[int]] = {}
+    self.live_range: dict[UOp, list[int]] = {}
     lr = self.live_range
     loops: dict[int, int] = {} # the interval of each loop, from its RANGE to the last non pseudo uop that reads that RANGE
+    regs: dict[UOp, UOp] = {}
+
     for idx,u in reversed(list(enumerate(uops))):
       if u.op in PSEUDO_OPS: continue
-      defs = regs(u)
-      for v in defs + tuple(rdef(s) for s in dedup(u.src)):
-        if isinstance(v, Register): lr.setdefault(v, []).insert(0, idx)
-      for v in defs:
+      for v in tuple(rdef(s) for s in dedup(u.src)) + (rdef(u),):
+        if isinstance(v, UOp): lr.setdefault(v, []).insert(0, idx)
+      if (v:=rdef(u)) is not None:
         if (n:=max((e for s,e in loops.items() if s <= lr[v][-1] < e), default=None)): lr[v].append(n)
       if u.op is Ops.RANGE: loops[idx] = max(j for j,x in enumerate(uops) if u in x.src and x.op not in PSEUDO_OPS)
 
     # allocate registers
-    self.spills: dict[Register, Any] = {} # mapping from virtual to arbitrary spill slot
-    self.reals: dict[int, dict[Register, Register]] = {} # mapping from virtual to real at each program point
-    self.insert_before: dict[int, list[tuple[Register, Register]]] = {} # fills to be inserted at each program point
-    live: dict[Register, Register] = {} # mapping from virtual to real that's currently assigned to it
-    live_ins: list[dict[Register, Register]] = [] # mapping from virtual to real at loop entry
+    self.spills: dict[UOp, Any] = {} # mapping from virtual to arbitrary spill slot
+    self.reals: dict[int, dict[UOp, str]] = {} # mapping from virtual to real at each program point
+    self.insert_before: dict[int, list[tuple[UOp, str]]] = {} # fills to be inserted at each program point
+    live: dict[UOp, str] = {} # mapping from virtual to real that's currently assigned to it
+    live_ins: list[dict[UOp, str]] = [] # mapping from virtual to real at loop entry
 
-    def alloc(cons:tuple[Register, ...], i:int) -> Register:
+    def alloc(cons:tuple[str, ...], i:int) -> str:
       live_inv = {v:k for k,v in live.items()}
       # allocate the best register. Registers not in live or not used again are free and have priority,
       # otherwise pick the one with the furthest next use. Regs that appear first in cons have priority in case of a tie
@@ -44,7 +45,7 @@ class LinearScanRegallocContext:
       return live.pop(vreg) if vreg is not None else reg
 
     # assign register to spilled virtual and record load to be emitted before current uop, also assign it a stack slot
-    def fill(v:Register, i:int, cons:tuple[Register, ...]|None=None) -> Register:
+    def fill(v:UOp, i:int, cons:tuple[str, ...]|None=None) -> str:
       if v not in self.spills:
         self.spills[v] = ctx.assign_spill_slot(v, self.vdef(v))
       r = alloc(cons if cons is not None else v.cons, i)
@@ -55,7 +56,7 @@ class LinearScanRegallocContext:
       if u.op in PSEUDO_OPS: continue
       # allocate uses
       for s in u.src:
-        if not isinstance(v:=rdef(s), Register): continue
+        if not isinstance(v:=rdef(s), UOp): continue
         if v not in live: live[v] = fill(v, i)
         self.reals.setdefault(i, {})[v] = live[v]
 
@@ -77,7 +78,7 @@ class LinearScanRegallocContext:
         # we move to registers vars used in the loop sorted by next use, vars not used in the loop will not be reloaded in the epilogue
         used_in_loop = [v for v in live.keys() | self.spills.keys() if any(i <= l < loops[i] for l in lr[v])]
         sorted_uses = sorted(used_in_loop, key=lambda k: (next(l-i for l in lr[k] if l >= i), lr[k][0], k.name, k.index))
-        live_in: dict[Register, Register] = {}
+        live_in: dict[UOp, str] = {}
         for v in sorted_uses:
           # if all the possible registers are already in live_in there's no space for this var
           if set(v.cons).issubset(live_in.values()): continue
@@ -100,8 +101,7 @@ def regalloc_rewrite(ctx:LinearScanRegallocContext, x:UOp):
   i = next(ctx.idx)
   if x.op in PSEUDO_OPS: return None
   nsrc = []
-  def retag(x:UOp, r:Register) -> UOp:
-    return x.replace(src=(retag(x.src[0],r),*x.src[1:])) if x.op in {Ops.AFTER, Ops.BITCAST} else with_regs(x, (r,))
+  # def retag(x:UOp, r:Register) -> UOp: return x.replace(src=(retag(x.src[0],r),*x.src[1:])) if x.op in {Ops.AFTER, Ops.BITCAST} else with_regs(x, (r,))
   for j,s in enumerate(x.src):
     # v here is the virtual defined by the original s as s is the rewritten version
     if (v:=rdef(ctx.uops[i].src[j])) in ctx.reals.get(i, {}):

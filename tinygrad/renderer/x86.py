@@ -11,33 +11,41 @@ from tinygrad.device import TinyELF
 from tinygrad.helpers import unwrap, Target
 from dataclasses import dataclass, field, replace
 
-@dataclass(frozen=True)
-class Register:
-  name: str
-  index: int
-  _cons: tuple[Register, ...] = field(default_factory=tuple)
-  size: int = 8
-  @property
-  def cons(self): return self._cons or (self,)
-  def __repr__(self): return self.name
-
 class IselContext:
   def __init__(self, sink:UOp):
     self.reg_n = itertools.count()
     params = sorted([u for u in sink.toposort() if u.op is Ops.PARAM], key=lambda u: u.arg.slot)
     self.arg_offsets = {u: o for u, (o, _) in zip(params, TinyELF.iter_sig(tuple((None, u.addrspace, u.dtype, ()) for u in params)))}
 
-  def vreg(self, cons:tuple[Register, ...]|Register, size:int=0):
-    cons = cons if isinstance(cons, tuple) else (cons,)
-    return Register(f"v{next(self.reg_n)}", 0, cons, size or cons[0].size)
+@dataclass(frozen=True)
+class RegisterClass:
+  name: str
+  cons: list[str]
+  spill_size: int
+  alloc: Callable[[UOp], bool]
 
-# the registers an INS defines follow its opcode and dtype in its arg
-def regs(u:UOp) -> tuple[Register, ...]: return u.arg[2:] if u.op is Ops.INS else ()
-def with_regs(u:UOp, r:tuple[Register, ...]) -> UOp: return u.replace(arg=u.arg[:2]+r)
+@dataclass(frozen=True)
+class ABIInfo:
+  reserved: set[str]
+  ptrs: dict[str, UOp]
 
-def rdef(u:UOp):
+def reg(dt:DType, r:str) -> UOp: return UOp.alloc((1,), dt, addrspace=AddrSpace.REG, name=r)
+
+def write_to_reg(ctx, u:UOp):
+  rc = next((c for c in ctx[0].reg_classes if alloc(u)), None)
+  if rc is None: return None
+  reg = UOp.alloc((1,), u.dtype, addrspace=AddrSpace.REG, name=f"v{rc.name}{next(ctx[1])}")
+  return reg.after(reg[0].store(u.replace(src=(reg,*u.src))))
+
+pm_insert_vregs = PatternMatcher([
+  (UPat(Ops.INS, name="u"), write_to_reg),
+])
+
+# verify with class info
+def is_reg(u:UOp) -> bool: return (x:=u.without_after).op in {Ops.ALLOC, Ops.BUFFER} and x.addrspace is AddrSpace.REG and isinstance(x.arg.name, str)
+def rdef(u:UOp) -> UOp|None:
   if u.op in {Ops.AFTER, Ops.BITCAST}: return rdef(u.src[0])
-  return r[0] if (r:=regs(u)) else None
+  return u.src[0] if u.op is Ops.INS and u.src and is_reg(u.src[0]) else None
 
 class LinearContext:
   def __init__(self, ren:ISARenderer):
@@ -51,6 +59,8 @@ class ISARenderer(Renderer):
   pre_regalloc_matcher: PatternMatcher
   post_regalloc_matcher: PatternMatcher
   linear_ctx_type: type = LinearContext
+  reg_classes: list[RegisterClass]
+  abi_info: ABIInfo
 
   def is_two_address(self, x:UOp) -> bool: return False
   def spill(self, spill_slot:Any, x:UOp) -> UOp: raise NotImplementedError("arch specific")
@@ -62,7 +72,7 @@ class ISARenderer(Renderer):
 class X86Ops(FastEnum):
   # NOTE: X86Ops with i suffix are variants that take an immediate, m suffix are variants that can write to memory instead of read from
   # these aren't real instructions
-  LABEL = auto(); IMM = auto(); REG = auto()
+  LABEL = auto(); IMM = auto()
   # index
   LEA = auto()
   # register / memory / immediate moves
@@ -218,34 +228,17 @@ pre_isel_matcher = PatternMatcher([
    lambda m,x: x.replace(src=x.src[:2]+(g,)) if (g:=flag_gate(m)) is not None else None),
 ])
 
-# ***** X86 registers *****
-RAX = Register("rax", 0)
-RCX = Register("rcx", 1)
-RDX = Register("rdx", 2)
-RBX = Register("rbx", 3)
-RSP = Register("rsp", 4)
-RBP = Register("rbp", 5)
-RSI = Register("rsi", 6)
-RDI = Register("rdi", 7)
-GPR = (RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI) + tuple(Register(f"r{i}", i) for i in range(8, 16))
-XMM = tuple(Register(f"xmm{i}", i, size=16) for i in range(16))
-# gprs you can write to
-WGPR = tuple(r for r in GPR if r != RSP)
-
-CALLEE_SAVED = (RBX, RBP, GPR[12], GPR[13], GPR[14], GPR[15])
-
 reg_strs = {"rax": {4:"eax", 2:"ax", 1:"al"}, "rcx": {4:"ecx", 2:"cx", 1:"cl"}, "rdx": {4:"edx", 2:"dx", 1:"dl"}, "rbx": {4:"ebx", 2:"bx", 1:"bl"},
         "rsp": {4:"esp", 2:"sp", 1:"spl"}, "rbp": {4:"ebp", 2:"bp", 1:"bpl"}, "rsi": {4:"esi", 2:"si", 1:"sil"}, "rdi": {4:"edi", 2:"di", 1:"dil"},
         **{f"r{i}": {4:f"r{i}d", 2:f"r{i}w", 1:f"r{i}b"} for i in range(8, 16)}}
 
 # a register defined outside the instruction stream: the stack pointer, the args pointer, a callee saved register
-def reg(dt:DType, r:Register) -> UOp: return UOp(Ops.INS, arg=(X86Ops.REG, dt, r))
-def stack_pointer() -> UOp: return reg(dtypes.uint64, RSP)
-def args_pointer() -> UOp: return reg(dtypes.uint64, RDI)
+def stack_pointer() -> UOp: return reg(dtypes.uint64, "rsp")
+def args_pointer() -> UOp: return reg(dtypes.uint64, "rdi")
 
 # ***** X86 instruction selection *****
 # a register buffer is its own virtual register, named by its identity
-def regbuf_reg(x:UOp) -> Register: return Register(f"b{x.key.hex()}", 0, *((XMM, 16) if x.dtype in dtypes.floats else (WGPR, x.dtype.itemsize)))
+# def regbuf_reg(x:UOp) -> Register: return Register(f"b{x.key.hex()}", 0, *((XMM, 16) if x.dtype in dtypes.floats else (WGPR, x.dtype.itemsize)))
 # a value moved into a register constrained to cons
 def pin(ctx:IselContext, x:UOp, cons:Register|tuple[Register, ...]) -> UOp: return x.ins(X86Ops.MOV, ctx.vreg(cons, x.dtype.itemsize), src=(x,))
 def base(x:UOp, i:int) -> UOp: return s.src[0] if (s:=x.src[i]).op is Ops.INDEX else s
@@ -332,22 +325,6 @@ def _xmm_sz(x: UOp) -> X86Ops:
   if bits >= 16: return X86Ops.VMOVUPS
   if bits >= 8: return X86Ops.VMOVSD
   return X86Ops.VMOVSS
-
-def alloc_vregs(ctx:IselContext, x:UOp) -> UOp|None:
-  # register placeholders with real registers
-  if is_imm(x): return None
-  # no register definition
-  if x.dtype is dtypes.void: return None
-  # already allocated vregs
-  if regs(x) and regs(x)[0]._cons: return None
-  # a register buffer is a REG, a stack buffer becomes the LEA of its address before regalloc
-  if x.op in {Ops.BUFFER, Ops.ALLOC}: return reg(x.dtype, regbuf_reg(x)) if x.addrspace is AddrSpace.REG else None
-  if regs(x): defs = [ctx.vreg(regs(x), x.dtype.itemsize)]
-  elif x.dtype in dtypes.floats or x.arg[0] in XMM_OPS: defs = [ctx.vreg(XMM)]
-  else: defs = [ctx.vreg(WGPR, x.dtype.itemsize)]
-  # TODO: add this once the scheduler can track register pressure
-  # if x.arg[0] in X86GroupOp.WriteFlags: defs.append(ctx.vreg(RFLAGS))
-  return with_regs(x, tuple(defs))
 
 def copy_op(dt:DType) -> X86Ops:
   return {dtypes.float16:X86Ops.VMOVSS, dtypes.float32:X86Ops.VMOVSS, dtypes.float64:X86Ops.VMOVSD, dtypes.bool:X86Ops.MOVZX}.get(dt, X86Ops.MOV)
@@ -482,8 +459,6 @@ isel_matcher = PatternMatcher([
   (UPat.var("a").store(UPat.var("b", dtypes.ints+(dtypes.bool,)), name="x"), lambda a,b,x: None if a.addrspace is AddrSpace.REG else
    x.ins(X86Ops[_xmm_sz(b).name+"m"], src=fold_address(a) + (b,)) if b.max_numel() > 1 else
    x.ins(X86Ops.MOVm, src=fold_address(a) + (b,)) if (i:=to_imm(b)) is None else x.ins(X86Ops.MOVi, src=fold_address(a) + (i,))),
-  # allocate virtual registers
-  (UPat((Ops.INS, Ops.BUFFER, Ops.ALLOC), name="x"), alloc_vregs),
 ])
 
 # ***** pre register allocation *****
@@ -706,16 +681,8 @@ class X86LinearContext(LinearContext):
     super().__init__(ren)
     self.lock: UOp|None = None
 
-  # stack alloc/dealloc and callee saved handling
   def insert_linearized(self, uops:list[UOp]) -> list[UOp]:
-    before, after, used = [], [], {r.name for u in uops if isinstance((r:=rdef(u)), Register)}
-    for r in CALLEE_SAVED:
-      if r.name in used:
-        a = reg(dtypes.uint64, r)
-        slot = self.assign_spill_slot(r,a)
-        before.append(self.ren.spill(slot,a))
-        after.append(self.ren.fill(slot,a,r))
-
+    before, after = [], []
     if self.stack_size > 0:
       before.insert(0, stack_pointer().ins(X86Ops.SUBi, RSP, src=(stack_pointer(),imm(dtypes.int32, self.stack_size))))
       after.append(stack_pointer().ins(X86Ops.ADDi, RSP, src=(stack_pointer(),imm(dtypes.int32, self.stack_size))))
@@ -737,6 +704,14 @@ class X86Renderer(ISARenderer):
   pre_regalloc_matcher = pre_regalloc_matcher
   post_regalloc_matcher = post_regalloc_matcher
   code_for_op = {x: lambda: None for x in (Ops.SQRT, Ops.AND, Ops.OR, Ops.SHL, Ops.SHR, Ops.NEG, Ops.SUB, Ops.FDIV, Ops.CMPLT, Ops.CMPNE)}
+  reg_classes = [
+    RegisterClass("xmm", [f"xmm{i}" for i in range(16)], 16, lambda u: u.dtype in dtypes.floats or u.arg[0] in XMM_OPS),
+    RegisterClass("wgpr", ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8,16)], 8, lambda u: True)
+  ]
+  abi_info = ABIInfo(
+    set(["rbx", "rbp", "r12", "r13", "r14", "r15"]),
+    {"rsp":reg(dtypes.uint64, "rsp"), "rdi":reg(dtypes.uint64, "rdi")}
+  )
   linear_ctx_type = X86LinearContext
   def __init__(self, target:Target):
     if target.arch.split(",")[0] != "x86_64": raise RuntimeError(f"X86Renderer only supports x86_64, got {target.arch}")
