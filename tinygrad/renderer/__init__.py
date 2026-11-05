@@ -67,6 +67,8 @@ class Renderer:
   inline_prefix: str|None = None
   # TODO: make this generic with a list of supported types
   supports_float4: bool = True
+  # upcast opts become vector ALU, which some compilers (tcc) can't render
+  supports_upcast: bool = True
   has_local: bool = True
   has_shared: bool = True
   # NOTE: these two should be in (x,y,z) order to match the max_sizes argument in get_grouped_dims

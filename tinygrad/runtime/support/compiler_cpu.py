@@ -1,4 +1,4 @@
-import subprocess
+import subprocess, shutil, tempfile, os
 from tinygrad.device import Compiler
 from tinygrad.helpers import getenv, capstone_flatdump, cpu_objdump
 
@@ -23,6 +23,22 @@ class ClangCompiler(Compiler):
 
   def disassemble(self, lib: bytes): cpu_objdump(lib)
 
+class TCCCompiler(Compiler):
+  def __init__(self, arch:list[str], cachekey="compile_tcc_obj"):
+    if shutil.which("tcc") is None: raise RuntimeError("tcc not found in PATH")
+    self.arch, cpu, *feats = arch
+    self.args = ()
+    super().__init__(f"{cachekey}_{'_'.join(arch)}")
+
+  def compile(self, src:str) -> bytes:
+    fd, fn = tempfile.mkstemp(suffix=".o")
+    os.close(fd)
+    try:
+      subprocess.check_output(["tcc", "-c", "-x", "c", "-", "-o", fn], input=src.encode('utf-8'))
+      with open(fn, "rb") as f: return f.read()
+    finally: os.unlink(fn)
+
+  def disassemble(self, lib: bytes): cpu_objdump(lib)
 
 class X86Compiler(Compiler):
   def __init__(self): super().__init__(None)

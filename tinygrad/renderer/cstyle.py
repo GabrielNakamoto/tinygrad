@@ -7,6 +7,7 @@ from tinygrad.uop.weak import commit_weak_consts
 from tinygrad.helpers import strip_parens, getenv, prod, dedup, Target, IMAGE, FLOAT16, is_image_shape
 from tinygrad.dtype import dtypes, DType, AddrSpace, truncate, to_storage_scalar
 from tinygrad.renderer import Renderer
+from tinygrad.runtime.support.compiler_cpu import ClangCompiler, TCCCompiler
 
 base_rewrite = PatternMatcher([
   # local/reg buffers
@@ -326,8 +327,43 @@ class ClangRenderer(CStyleLanguage):
 
   def __init__(self, target:Target):
     super().__init__(target)
-    from tinygrad.runtime.support.compiler_cpu import ClangCompiler
     self.compiler = ClangCompiler(target.arch.split(","))
+
+class TCCRenderer(ClangRenderer):
+  supports_float4 = False
+  supports_upcast = False
+  barrier = "((void)0);"
+  infinity = '(({ union { unsigned int u; float f; } v; v.u = 0x7f800000u; v.f; }))'
+  nan = '(({ union { unsigned int u; float f; } v; v.u = 0x7fc00000u; v.f; }))'
+  code_for_op = {**ClangRenderer.code_for_op,
+                 Ops.SQRT: lambda x,dtype: f"sqrt({x})" if dtype == dtypes.float64 else f"sqrtf({x})",
+                 Ops.TRUNC: lambda x,dtype: f"trunc({x})" if dtype == dtypes.float64 else f"truncf({x})"}
+  extra_matcher = pm_narrow_uint + PatternMatcher([
+    (UPat.var("y", dtypes.uint64).cast(dtypes.floats, name="x"), lambda y,x:
+     (y < 2**63).where(y.cast(dtypes.int64).cast(x.dtype), ((y >> 1) | (y & 1)).cast(dtypes.int64).cast(x.dtype) * 2)),
+    (UPat.var("y", dtypes.floats).cast(dtypes.uint64, name="x"), lambda y,x:
+     (y < 2**63).where(y.cast(dtypes.int64).cast(dtypes.uint64), (y - 2.0**63).cast(dtypes.int64).cast(dtypes.uint64) + (1 << 63))),
+  ])
+  string_rewrite = PatternMatcher([
+    (UPat(Ops.BITCAST, name="x"), lambda ctx,x:
+      f"(({{ union {{ {ctx.render_type(x.src[0])} s; {ctx.render_type(x)} d; }} v; v.s = ({ctx[x.src[0]]}); v.d; }}))"
+      if x.addrspace not in (AddrSpace.GLOBAL, AddrSpace.LOCAL) else None),
+    (UPat(Ops.BINARY, name="x"), lambda ctx,x: f'static const unsigned char {ctx[x]}[] = "' + ''.join(f'\\x{b:02x}' for b in x.arg) + '";'),
+  ]) + base_rewrite
+
+  def render_vector_prefix(self, dt:DType, count:int) -> str: raise RuntimeError("TCC renderer can't render vector dtypes")
+  def render_kernel(self, function_name, kernel, bufs, uops, prefix=None) -> str:
+    libm = {Ops.SQRT: "sqrt", Ops.TRUNC: "trunc"}
+    protos = [f"{self.render_dtype(dt)} {libm[op]}{'f' if dt == dtypes.float else ''}({self.render_dtype(dt)});"
+              for op, dt in dedup((u.op, u.dtype) for u in uops) if op in libm and dt in (dtypes.float, dtypes.double)]
+    if any(u.op in {Ops.CUSTOM, Ops.CUSTOMI} and "__atomic_fetch_add" in u.arg[0] for u in uops):
+      protos += ["#define __ATOMIC_RELAXED 0",
+                 "#define __atomic_fetch_add(p, v, m) ({ __typeof__(p) _p = (p); __typeof__(*_p) _old = *_p; *_p = _old + (v); _old; })"]
+    return super().render_kernel(function_name, kernel, bufs, uops, protos + (prefix or []))
+  def supported_dtypes(self): return {d for d in Renderer.supported_dtypes(self) if d not in (dtypes.half, dtypes.bfloat16, *dtypes.fp8s)}
+  def __init__(self, target:Target):
+    CStyleLanguage.__init__(self, target)
+    self.compiler = TCCCompiler(target.arch.split(","))
 
 class OpenCLRenderer(CStyleLanguage):
   # language options

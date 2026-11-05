@@ -28,6 +28,9 @@ def elf_loader(blob:bytes, force_section_align:int=1, link_libs:list[ctypes.CDLL
   def _to_carray(sh, ctype): return (ctype * (sh.header.sh_size // sh.header.sh_entsize)).from_buffer_copy(sh.content)
   rel = [(sh, sh.name[4:], _to_carray(sh, getattr(libc, f"{ecls}_Rel"))) for sh in sections if sh.header.sh_type == libc.SHT_REL]
   rela = [(sh, sh.name[5:], _to_carray(sh, getattr(libc, f"{ecls}_Rela"))) for sh in sections if sh.header.sh_type == libc.SHT_RELA]
+  symtab_sh = next((sh for sh in section_headers if sh.sh_type == libc.SHT_SYMTAB), None)
+  # symbol names live in the symtab's linked string table (.strtab), NOT in .shstrtab (those are only equal for clang objects)
+  sym_strtab = blob[(ss:=section_headers[unwrap(symtab_sh).sh_link]).sh_offset:ss.sh_offset+ss.sh_size] if symtab_sh else b""
   symtab = next((_to_carray(sh, getattr(libc, f"{ecls}_Sym")) for sh in sections if sh.header.sh_type == libc.SHT_SYMTAB), None)
   progbits = [sh for sh in sections if sh.header.sh_type == libc.SHT_PROGBITS]
 
@@ -46,7 +49,7 @@ def elf_loader(blob:bytes, force_section_align:int=1, link_libs:list[ctypes.CDLL
     target_image_off = next(tsh for tsh in sections if tsh.name == trgt_sh_name).header.sh_addr
     rels = [(r.r_offset, unwrap(symtab)[getattr(libc, f"{ecls.upper()}_R_SYM")(r.r_info)], getattr(libc, f"{ecls.upper()}_R_TYPE")(r.r_info),
              getattr(r, "r_addend", 0)) for r in c_rels]
-    relocs += [(target_image_off + roff, link_sym(_strtab(sh_strtab, sym.st_name), link_libs or [], link_syms) if sym.st_shndx == 0 else
+    relocs += [(target_image_off + roff, link_sym(_strtab(sym_strtab, sym.st_name), link_libs or [], link_syms) if sym.st_shndx == 0 else
                 sections[sym.st_shndx].header.sh_addr + sym.st_value, rtype, raddend) for roff, sym, rtype, raddend in rels]
 
   return memoryview(image), sections, relocs
