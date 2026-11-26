@@ -2,7 +2,7 @@ import unittest
 from tinygrad.helpers import Target
 from tinygrad.uop.ops import UOp
 from tinygrad.dtype import dtypes
-from tinygrad.renderer.x86 import X86Ops, X86Renderer, RBP, RDI, RSP, RSI, RAX, RDX, XMM, GPR, fold_address
+from tinygrad.renderer.isa.x86 import X86Ops, X86Renderer, RBP, RDI, RSP, RSI, RAX, RDX, XMM, GPR, fold_address
 
 class TestEncodingsX86(unittest.TestCase):
   # NOTE: x86 supports a single displacement as memory address and index without base memory address

@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any, TypedDict, TypeVar, Generator, Callable
 from tinygrad.helpers import colored, getenv, unwrap, word_wrap, ProfileEvent, ProfileRangeEvent, TracingKey, ProfilePointEvent, temp
 from tinygrad.helpers import printable, Context, START_TIME, NO_COLOR, ansistrip
-from tinygrad.renderer.amd.dsl import Inst, Reg
+from tinygrad.renderer.amd.dsl import Inst, Reg, Opcode
 from tinygrad.renderer.amd import detect_format
 from tinygrad.runtime.autogen.amd.common import OpType
 from tinygrad.runtime.autogen.amd.rdna3.ins import s_code_end
@@ -131,7 +131,8 @@ def uop_to_json(data:VizData, x:UOp) -> dict[int, dict]:
     if u.op in {*GroupOp.Movement, Ops.PARAM}: excluded.update(s for s in u.src if s.op is Ops.STACK and all(x.op is Ops.CONST for x in s.src))
     if u.op in GroupOp.Broadcastable and all(s.op in {Ops.CONST, Ops.PARAM} for s in u.src): excluded.update(u.src)
   for u in toposort:
-    argst = u.arg if u.op is Ops.SOURCE else codecs.decode(u.arg if isinstance(u.arg, str) else _render_arg(u), "unicode_escape")
+    argst = u.arg if u.op is Ops.SOURCE else codecs.decode(str(u.arg.code) if u.op is Ops.NATIVE and isinstance(u.arg.code, Opcode) else
+                                                        u.arg if isinstance(u.arg, str) else _render_arg(u), "unicode_escape")
     with soft_err():
       if u.op in GroupOp.Movement and u.marg: argst = (mask_to_str if u.op in {Ops.SHRINK, Ops.PAD} else shape_to_str)(u.marg)
     if u.op is Ops.BINARY: argst = f"<{len(u.arg)} bytes>"

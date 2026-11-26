@@ -8,6 +8,7 @@ from tinygrad.device import BufferStorage, BufferSpec, Buffer, Device, Allocator
 from tinygrad.dtype import dtypes, DType
 from tinygrad.helpers import getenv, round_up, data64_le, PROFILE, ProfileEvent, lo32, hi32, prod, colored
 from tinygrad.helpers import ceildiv, pluralize, ContextVar, VIZ, DEV
+from tinygrad.renderer.isa.rdna3 import RDNA3Renderer
 from tinygrad.renderer.cstyle import HIPRenderer, HIPCCRenderer
 from tinygrad.renderer.llvmir import AMDLLVMRenderer
 from tinygrad.runtime.autogen import kfd, hsa, amdgpu_kd, amdgpu_drm, libc
@@ -847,7 +848,7 @@ class USBIface(PCIIface):
 def _mock(iface, name=None): return type(name or f"MOCK{iface.__name__}", (iface,), {})
 
 class AMDDevice(Compiled):
-  renderers = [HIPRenderer, AMDLLVMRenderer, HIPCCRenderer]
+  renderers = [HIPRenderer, AMDLLVMRenderer, HIPCCRenderer, RDNA3Renderer]
   timestamp_divider = 100.0  # AMD GPU clock: ticks/us
   sleep_timeout_ms = 200
   max_scratch_psize = 0

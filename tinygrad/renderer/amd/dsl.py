@@ -1,5 +1,9 @@
 # dsl.py - clean DSL for AMD assembly
+import functools
 from typing import Any
+
+class Opcode(functools.partial):
+  def __str__(self): return self.args[0].name.lower()
 
 # ══════════════════════════════════════════════════════════════
 # Registers - unified src encoding space (0-511)

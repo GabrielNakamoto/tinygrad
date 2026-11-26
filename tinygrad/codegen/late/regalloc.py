@@ -1,7 +1,7 @@
 import itertools
 from tinygrad.helpers import dedup, get_single_element
 from tinygrad.uop.ops import UOp, Ops, PatternMatcher, UPat
-from tinygrad.renderer.x86 import ISARenderer, vdef, register_choices, LinearContext
+from tinygrad.renderer.isa import ISARenderer, vdef, LinearContext, register_choices
 
 # ops that participate in register allocation
 REGALLOC_OPS = {Ops.CALL, Ops.BUFFER, Ops.RANGE, Ops.END}

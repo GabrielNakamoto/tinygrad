@@ -1,6 +1,7 @@
 import inspect, functools, itertools
 from tinygrad.device import BufferStorage, BufferSpec, Buffer, Compiled, HostAllocator, MMIOInterface, Program, ProfileGraphEntry, ProfileGraphEvent
-from tinygrad.renderer import Renderer, cstyle, nir, ptx, llvmir, wgsl, x86
+from tinygrad.renderer import Renderer, cstyle, nir, ptx, llvmir, wgsl
+from tinygrad.renderer.isa import x86
 from tinygrad.renderer.cstyle import CStyleLanguage
 from tinygrad.uop.ops import UOp, Ops, UPat, PatternMatcher, KernelInfo, uopfunc
 from tinygrad.dtype import dtypes

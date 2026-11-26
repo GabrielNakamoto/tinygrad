@@ -35,13 +35,14 @@ def assemble_linear(prg:UOp, lin:UOp, arch:str) -> bytes:
       elif val.offset < 106: max_sgpr = max(max_sgpr, val.offset + val.sz)
 
   # ** scan sink for metadata
-  sink, param_sizes, lds_size, scratch_size, gids = prg.src[0], {}, 0, 0, set()
+  sink = prg.src[0]
+  param_sizes = {p.arg.slot:p.dtype.itemsize if p.addrspace is AddrSpace.ALU else 8 for p in prg.arg.params}
+  lds_size, scratch_size, gids = 0, 0, set()
   arch = next(v for k, v in _arch_map.items() if arch.startswith(k))
   is_cdna, is_rdna4 = arch == "cdna", arch == "rdna4"
   wave32 = not is_cdna
   for u in sink.toposort():
-    if u.op is Ops.PARAM: param_sizes[u.arg.slot] = u.dtype.itemsize if u.addrspace is AddrSpace.ALU else 8
-    elif u.op is Ops.BUFFER and u.addrspace is AddrSpace.LOCAL and u.arg.name == "scratch": scratch_size += u.max_numel() * u.dtype.itemsize
+    if u.op is Ops.BUFFER and u.addrspace is AddrSpace.LOCAL and u.arg.name == "scratch": scratch_size += u.max_numel() * u.dtype.itemsize
     elif u.op is Ops.BUFFER and u.addrspace is AddrSpace.LOCAL: lds_size += u.max_numel() * u.dtype.itemsize
     elif u.op is Ops.SPECIAL and u.arg.startswith("gidx"): gids.add(int(u.arg[-1]))
     elif u.op is Ops.RANGE and u.axis_type is AxisType.WARP and u.src[0].arg == 64: wave32 = True
